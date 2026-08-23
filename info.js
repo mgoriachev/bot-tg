@@ -1,1 +1,0 @@
-export const API_TOKEN = '8804901978:AAH8zSvI2QeODmaDN1BLTMR3sRMnmI9xYvk';
