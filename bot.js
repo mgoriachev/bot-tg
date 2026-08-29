@@ -81,6 +81,8 @@ bot.on('text', async (ctx) => {
                 
             } catch (error) {
                 console.error('Ошибка ИИ:', error);
+                // Бот пришлет текст ошибки вам в личку
+                await ctx.telegram.sendMessage(MY_ID, `⚠️ Ошибка нейросети: ${error.message}`).catch(() => {});
             }
         }
     }
