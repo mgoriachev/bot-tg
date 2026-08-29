@@ -1,99 +1,94 @@
-require("dotenv").config();
-const { Telegraf } = require("telegraf");
-const express = require("express");
+require('dotenv').config();
+const { Telegraf } = require('telegraf');
+const express = require('express');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
+// Инициализация бота и AI
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const app = express();
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }); 
 
-// bot.use(async (ctx, next) => {
-
-//     if (ctx.message && ctx.from) {
-
-//         if (ctx.from.id === 141824902) {
-//             await ctx.reply('Ну го', {
-//                 reply_parameters: { message_id: ctx.message.message_id }
-//             });
-//         }
-//     }
-
-//     return next();
-// });
-
-// --- ВАШИ ТРИГГЕРНЫЕ ФРАЗЫ (bot.hears) ---
-
-// Существующий триггер
-bot.hears(/го до/i, (ctx) => {
-  ctx.reply("Ну погнали! Заводи мотор! 🔑");
-});
-
-// Новый триггер 1 (реагирует на точное совпадение слова)
-bot.hears(/чей член/i, (ctx) => {
-  ctx.reply("Твой ёпта. Фото будет? 🌈");
-});
-
-// Новый триггер 2 (сработает на "привет", "Приветствую", "приветик")
-bot.hears(/Го в/i, (ctx) => {
-  ctx.reply("Ну погнали. Тебя за ручку вести надо? 👥");
-});
-
-bot.hears(/Эй Юмак/i, (ctx) => {
-  ctx.reply("Чо зовешь? В лесу потерялся 👨‍❤️‍💋‍👨", {
-    // Указываем Telegram, на какое именно сообщение мы отвечаем
-    reply_parameters: { message_id: ctx.message.message_id },
-  });
-});
-
+// Настройки ID
 const MY_ID = 141824902; // Ваш ID
 const GROUP_ID = -5278268745; // ID вашей группы
 
-bot.on("text", async (ctx, next) => {
-  // Проверяем, что пишут в личку и это именно вы
-  if (ctx.chat.type === "private" && ctx.from.id === MY_ID) {
-    const text = ctx.message.text;
+const app = express();
 
-    // Регулярное выражение, которое ищет ссылку на сообщение Telegram
-    // (работает с публичными https://t.me/groupname/123 и приватными https://t.me/c/123/456)
-    const linkMatch = text.match(/t\.me\/(?:c\/\d+\/|[a-zA-Z0-9_]+\/)(\d+)/);
-
-    try {
-      if (linkMatch) {
-        // Если ссылка найдена, достаем ID сообщения (это цифры в самом конце ссылки)
-        const targetMessageId = parseInt(linkMatch[1]);
-
-        // Убираем саму ссылку из вашего текста, чтобы бот отправил только ответ
-        // Убираем 'https://' если вы скопировали ссылку целиком
-        let replyText = text.replace(/https?:\/\/[^\s]+/, "").trim();
-
-        if (!replyText) {
-          return ctx.reply(
-            "Вы прислали ссылку, но забыли написать текст ответа!",
-          );
-        }
-
-        // Отправляем сообщение в группу с цитированием
-        await ctx.telegram.sendMessage(GROUP_ID, replyText, {
-          reply_parameters: { message_id: targetMessageId },
-        });
-        await ctx.reply("✅ Ответ с цитированием успешно отправлен!");
-      } else {
-        // Если ссылки в тексте нет, отправляем как обычное самостоятельное сообщение
-        await ctx.telegram.sendMessage(GROUP_ID, text);
-        await ctx.reply("✅ Простое сообщение отправлено в группу!");
-      }
-    } catch (err) {
-      await ctx.reply("❌ Ошибка. Возможно, сообщение в группе уже удалено.");
-      console.error(err);
+// --- 1. РАДАР: ДУБЛИРУЕМ СООБЩЕНИЯ ИЗ ГРУППЫ ВАМ В ЛИЧКУ ---
+bot.use(async (ctx, next) => {
+    if (ctx.chat && ctx.chat.id === GROUP_ID && ctx.message && ctx.message.text) {
+        const adminText = `💬 ${ctx.from.first_name} пишет:\n\n${ctx.message.text}\n\n[id:${ctx.message.message_id}]`;
+        await ctx.telegram.sendMessage(MY_ID, adminText).catch(() => {});
     }
-  } else {
-    // Пропускаем все остальные сообщения к вашим триггерам (bot.hears)
     return next();
-  }
 });
 
-// ----------------------------------------------------
+// --- 2. ПУЛЬТ УПРАВЛЕНИЯ (РУЧНОЙ ОТВЕТ ИЗ ЛИЧКИ) ---
+bot.on('text', async (ctx, next) => {
+    if (ctx.chat && ctx.chat.type === 'private' && ctx.from.id === MY_ID) {
+        if (ctx.message.reply_to_message && ctx.message.reply_to_message.text) {
+            const match = ctx.message.reply_to_message.text.match(/\[id:(\d+)\]/);
+            if (match) {
+                const targetMessageId = parseInt(match[1]);
+                try {
+                    await ctx.telegram.sendMessage(GROUP_ID, ctx.message.text, {
+                        reply_parameters: { message_id: targetMessageId }
+                    });
+                    await ctx.reply('✅ Ответ с цитированием отправлен!');
+                    return; 
+                } catch (err) {
+                    return ctx.reply('❌ Ошибка. Возможно, сообщение удалено.');
+                }
+            }
+        }
+        try {
+            await ctx.telegram.sendMessage(GROUP_ID, ctx.message.text);
+            await ctx.reply('✅ Простое сообщение отправлено!');
+            return;
+        } catch (err) {
+            return ctx.reply('❌ Ошибка отправки.');
+        }
+    }
+    return next();
+});
 
+// --- 3. ИСКУССТВЕННЫЙ ИНТЕЛЛЕКТ И ЛИЧНОСТЬ БОТА ---
+bot.on('text', async (ctx) => {
+    if (ctx.chat && ctx.chat.type !== 'private') {
+        const text = ctx.message.text.toLowerCase();
+        
+        const isMentioned = text.includes('юсэм') || text.includes('юмак');
+        const isReplyToBot = ctx.message.reply_to_message && 
+                             ctx.message.reply_to_message.from.id === ctx.botInfo.id;
+
+        if (isMentioned || isReplyToBot) {
+            try {
+                await ctx.sendChatAction('typing');
+
+                const systemPrompt = `Ты — дерзкий, энергичный и веселый участник группового чата. Твои имена — Юсэм (или Юмак), ты отзываешься на оба. 
+Твои главные страсти — это стрит-рейсинг, уличные танцы и крутые тачки. Ты отлично разбираешься в автомобилях: обожаешь японский aftermarket-тюнинг в стиле Artisan Spirits или Modellista, ценишь эстетику Toyota GR Supra, а также уважаешь мощные мускул-кары вроде Mustang и Camaro. 
+Вплетай в свои ответы автомобильный и танцевальный сленг (например: "дать угла", "включить нитро", "поймать ритм", "залететь на танцпол", "выжать максимум"). 
+Ты общаешься коротко, дерзко, с юмором, как свой парень в тусовке рейсеров. Ты НЕ искусственный интеллект, никогда не упоминай об этом. Отвечай без воды, максимум 2-3 предложения.`;
+                
+                const finalPrompt = `${systemPrompt}\n\nСообщение от пользователя ${ctx.from.first_name}: ${ctx.message.text}`;
+
+                const result = await aiModel.generateContent(finalPrompt);
+                const aiResponse = result.response.text();
+
+                await ctx.reply(aiResponse, {
+                    reply_parameters: { message_id: ctx.message.message_id }
+                });
+                
+            } catch (error) {
+                console.error('Ошибка ИИ:', error);
+            }
+        }
+    }
+});
+
+// --- ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ---
 bot.launch();
-console.log("Бот с новыми правилами запущен!");
+console.log('Умный бот Юсэм/Юмак успешно запущен!');
 
-app.get("/", (req, res) => res.send("Бот активен!"));
+app.get('/', (req, res) => res.send('Бот активен!'));
 app.listen(process.env.PORT || 3000);
