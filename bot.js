@@ -9,12 +9,12 @@ const { SYSTEM_PROMPT } = require('./prompt');
 // CONFIG
 // ============================================================
 
-const requiredEnv = [
+const REQUIRED_ENV = [
     'BOT_TOKEN',
     'GEMINI_API_KEY'
 ];
 
-for (const key of requiredEnv) {
+for (const key of REQUIRED_ENV) {
     if (!process.env[key]) {
         console.error(`❌ Не задана переменная окружения: ${key}`);
         process.exit(1);
@@ -24,28 +24,67 @@ for (const key of requiredEnv) {
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+// Твой Telegram ID
 const MY_ID = 141824902;
+
+// ID группы
 const GROUP_ID = -5278268745;
 
+// Render сам передаёт PORT
 const PORT = Number(process.env.PORT) || 3000;
 
-// Порядок fallback-моделей.
-// Можно переопределить на Render через GEMINI_MODELS.
+// ============================================================
+// GEMINI MODELS
+// ============================================================
+
+/*
+ * Порядок моделей.
+ *
+ * Их можно изменить на Render через:
+ *
+ * GEMINI_MODELS=gemini-3.7-flash,...
+ */
+
 const GEMINI_MODELS = (
     process.env.GEMINI_MODELS ||
-    'gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite'
+    [
+        'gemini-3.7-flash',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite'
+    ].join(',')
 )
     .split(',')
     .map(model => model.trim())
     .filter(Boolean);
 
-// Память
+// ============================================================
+// MEMORY
+// ============================================================
+
 const MAX_HISTORY = 20;
 const MAX_CONTEXT_CHARS = 12000;
 
-// Retry одной модели
+const chatHistory = new Map();
+
+// ============================================================
+// GEMINI SETTINGS
+// ============================================================
+
+// Сколько раз повторять одну модель
 const RETRIES_PER_MODEL = 1;
-const RETRY_DELAY_MS = 1200;
+
+// Пауза между повторными попытками
+const RETRY_DELAY_MS = 1000;
+
+// Если модель получила 503 / 429 / timeout,
+// не пробуем её снова некоторое время
+const MODEL_COOLDOWN_MS = 60 * 1000;
+
+const modelCooldowns = new Map();
 
 // ============================================================
 // TELEGRAM
@@ -57,10 +96,13 @@ const bot = new Telegraf(BOT_TOKEN);
 // GEMINI
 // ============================================================
 
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const genAI = new GoogleGenerativeAI(
+    GEMINI_API_KEY
+);
 
 const aiModels = GEMINI_MODELS.map(modelName => ({
     name: modelName,
+
     instance: genAI.getGenerativeModel({
         model: modelName,
         systemInstruction: SYSTEM_PROMPT
@@ -68,7 +110,7 @@ const aiModels = GEMINI_MODELS.map(modelName => ({
 }));
 
 // ============================================================
-// EXPRESS / RENDER
+// EXPRESS
 // ============================================================
 
 const app = express();
@@ -87,14 +129,14 @@ app.get('/health', (req, res) => {
 });
 
 const server = app.listen(PORT, () => {
-    console.log(`🌐 HTTP сервер запущен на порту ${PORT}`);
+    console.log(
+        `🌐 HTTP сервер запущен на порту ${PORT}`
+    );
 });
 
 // ============================================================
-// MEMORY
+// MEMORY FUNCTIONS
 // ============================================================
-
-const chatHistory = new Map();
 
 function getHistory(chatId) {
     if (!chatHistory.has(chatId)) {
@@ -104,7 +146,12 @@ function getHistory(chatId) {
     return chatHistory.get(chatId);
 }
 
-function addToHistory(chatId, role, name, text) {
+function addToHistory(
+    chatId,
+    role,
+    name,
+    text
+) {
     const history = getHistory(chatId);
 
     history.push({
@@ -148,8 +195,12 @@ function buildHistoryContext(chatId) {
 }
 
 // ============================================================
-// HELPERS
+// BASIC HELPERS
 // ============================================================
+
+function isGroupMessage(ctx) {
+    return ctx.chat?.id === GROUP_ID;
+}
 
 function isOwnerPrivate(ctx) {
     return (
@@ -158,43 +209,48 @@ function isOwnerPrivate(ctx) {
     );
 }
 
-function isGroupMessage(ctx) {
-    return ctx.chat?.id === GROUP_ID;
-}
-
 function isBotMessage(ctx) {
     return Boolean(ctx.from?.is_bot);
 }
 
 /*
- * ВАЖНО:
- * Не используем \b для русских слов.
+ * Простая и надёжная проверка.
  *
- * Эта проверка распознаёт:
- * Юмак
- * юмак
- * ЮМАК
- * Юсэм
- * юсэм, расскажи
- *
- * Но не считает упоминанием:
- * юмака
- * юсэмка
+ * Для нашего бота нет смысла использовать сложный regex.
+ * Нам важно понять, содержит ли сообщение "юсэм" или "юмак".
  */
 function isMentioned(text = '') {
     if (!text) {
         return false;
     }
 
-    return /(?:^|[^а-яёa-z])(юсэм|юмак)(?=$|[^а-яёa-z])/iu.test(text);
+    const normalized = text
+        .toLowerCase()
+        .replace(/ё/g, 'е');
+
+    return (
+        normalized.includes('юсэм') ||
+        normalized.includes('юмак')
+    );
 }
 
 function isReplyToBot(ctx) {
-    const reply = ctx.message?.reply_to_message;
+    const reply =
+        ctx.message?.reply_to_message;
 
-    return Boolean(
-        reply?.from?.id &&
-        ctx.botInfo?.id &&
+    if (!reply) {
+        return false;
+    }
+
+    if (!reply.from?.id) {
+        return false;
+    }
+
+    if (!ctx.botInfo?.id) {
+        return false;
+    }
+
+    return (
         reply.from.id === ctx.botInfo.id
     );
 }
@@ -205,14 +261,44 @@ function sleep(ms) {
     });
 }
 
-/*
- * Проверяем, является ли ошибка временной.
- */
-function isRetryableGeminiError(error) {
-    const message =
-        String(error?.message || '').toLowerCase();
+// ============================================================
+// MODEL COOLDOWN
+// ============================================================
 
-    const retryablePatterns = [
+function isModelOnCooldown(modelName) {
+    const cooldownUntil =
+        modelCooldowns.get(modelName);
+
+    if (!cooldownUntil) {
+        return false;
+    }
+
+    if (Date.now() >= cooldownUntil) {
+        modelCooldowns.delete(modelName);
+        return false;
+    }
+
+    return true;
+}
+
+function putModelOnCooldown(modelName) {
+    modelCooldowns.set(
+        modelName,
+        Date.now() + MODEL_COOLDOWN_MS
+    );
+}
+
+// ============================================================
+// GEMINI ERROR HELPERS
+// ============================================================
+
+function isTemporaryGeminiError(error) {
+    const message =
+        String(
+            error?.message || ''
+        ).toLowerCase();
+
+    const patterns = [
         '429',
         '500',
         '502',
@@ -227,7 +313,7 @@ function isRetryableGeminiError(error) {
         'fetching'
     ];
 
-    return retryablePatterns.some(pattern =>
+    return patterns.some(pattern =>
         message.includes(pattern)
     );
 }
@@ -241,12 +327,28 @@ async function generateAIResponse(prompt) {
 
     if (!aiModels.length) {
         throw new Error(
-            'Не настроена ни одна модель Gemini.'
+            'Нет доступных моделей Gemini.'
         );
     }
 
     for (const model of aiModels) {
-        console.log(`🤖 Пробуем модель: ${model.name}`);
+
+        // --------------------------------------------
+        // Проверяем cooldown
+        // --------------------------------------------
+
+        if (isModelOnCooldown(model.name)) {
+            console.log(
+                `⏸️ [GEMINI] ${model.name} ` +
+                `временно пропущена`
+            );
+
+            continue;
+        }
+
+        console.log(
+            `🤖 [GEMINI] Пробуем ${model.name}`
+        );
 
         for (
             let attempt = 1;
@@ -254,11 +356,21 @@ async function generateAIResponse(prompt) {
             attempt++
         ) {
             try {
+
+                console.log(
+                    `🔄 [GEMINI] ${model.name}, ` +
+                    `попытка ${attempt}`
+                );
+
                 const result =
-                    await model.instance.generateContent(prompt);
+                    await model.instance.generateContent(
+                        prompt
+                    );
 
                 const responseText =
-                    result?.response?.text?.()?.trim();
+                    result?.response
+                        ?.text?.()
+                        ?.trim();
 
                 if (!responseText) {
                     throw new Error(
@@ -267,7 +379,8 @@ async function generateAIResponse(prompt) {
                 }
 
                 console.log(
-                    `✅ Ответ получен через ${model.name}`
+                    `✅ [GEMINI] Ответ получен через ` +
+                    `${model.name}`
                 );
 
                 return {
@@ -276,36 +389,63 @@ async function generateAIResponse(prompt) {
                 };
 
             } catch (error) {
+
                 lastError = error;
 
                 console.error(
-                    `⚠️ Ошибка ${model.name} ` +
-                    `(попытка ${attempt}):`,
+                    `❌ [GEMINI] ${model.name} ` +
+                    `попытка ${attempt}:`
+                );
+
+                console.error(
                     error.message
                 );
 
+                const temporary =
+                    isTemporaryGeminiError(
+                        error
+                    );
+
                 /*
-                 * Если ошибка постоянная —
-                 * не тратим повторную попытку.
+                 * Временная ошибка:
+                 * ставим модель на cooldown.
                  */
-                if (!isRetryableGeminiError(error)) {
+                if (temporary) {
+                    putModelOnCooldown(
+                        model.name
+                    );
+
+                    console.log(
+                        `⏸️ [GEMINI] ${model.name} ` +
+                        `уходит на cooldown ` +
+                        `${MODEL_COOLDOWN_MS / 1000} сек.`
+                    );
+                }
+
+                /*
+                 * Непостоянная/постоянная ошибка —
+                 * переходим к следующей модели.
+                 */
+                if (!temporary) {
                     break;
                 }
 
                 /*
-                 * Ошибка временная —
-                 * пробуем модель ещё раз.
+                 * Для временной ошибки есть одна
+                 * повторная попытка.
                  */
                 if (
                     attempt <= RETRIES_PER_MODEL
                 ) {
-                    await sleep(RETRY_DELAY_MS);
+                    await sleep(
+                        RETRY_DELAY_MS
+                    );
                 }
             }
         }
 
         console.log(
-            `🔄 Переключаемся после ${model.name}`
+            `➡️ [GEMINI] Переход после ${model.name}`
         );
     }
 
@@ -318,164 +458,211 @@ async function generateAIResponse(prompt) {
 }
 
 // ============================================================
-// 1. РАДАР ГРУППЫ
+// RADAR
 // ============================================================
 
-bot.use(async (ctx, next) => {
+async function sendRadarMessage(ctx) {
+    if (!isGroupMessage(ctx)) {
+        return;
+    }
+
+    if (!ctx.message?.text) {
+        return;
+    }
+
+    if (isBotMessage(ctx)) {
+        return;
+    }
+
+    const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        'Неизвестный пользователь';
+
+    const username =
+        ctx.from?.username
+            ? `@${ctx.from.username}`
+            : '';
+
+    const adminText =
+        `💬 ${senderName} ${username}\n\n` +
+        `${ctx.message.text}\n\n` +
+        `📌 [group:${GROUP_ID}]\n` +
+        `🆔 [msg:${ctx.message.message_id}]`;
+
     try {
-        if (
-            isGroupMessage(ctx) &&
-            ctx.message?.text &&
-            !isBotMessage(ctx)
-        ) {
-            const senderName =
-                ctx.from?.first_name ||
-                ctx.from?.username ||
-                'Неизвестный пользователь';
+        await ctx.telegram.sendMessage(
+            MY_ID,
+            adminText
+        );
 
-            const username =
-                ctx.from?.username
-                    ? `@${ctx.from.username}`
-                    : '';
+        console.log(
+            `📡 [RADAR] msg=${ctx.message.message_id} ` +
+            `→ owner`
+        );
 
-            const adminText =
-                `💬 ${senderName} ${username}\n\n` +
-                `${ctx.message.text}\n\n` +
-                `📌 [group:${GROUP_ID}]\n` +
-                `🆔 [msg:${ctx.message.message_id}]`;
-
-            await ctx.telegram
-                .sendMessage(MY_ID, adminText)
-                .catch(error => {
-                    console.error(
-                        '⚠️ Ошибка отправки радара:',
-                        error.message
-                    );
-                });
-        }
     } catch (error) {
         console.error(
-            '❌ Ошибка радара:',
-            error
+            '❌ [RADAR] Ошибка:',
+            error.message
         );
     }
-
-    return next();
-});
+}
 
 // ============================================================
-// 2. /START
+// OWNER COMMANDS
 // ============================================================
 
-bot.command('start', async ctx => {
+async function handleOwnerCommand(ctx) {
     if (!isOwnerPrivate(ctx)) {
-        return;
-    }
-
-    await ctx.reply(
-        '🏎️ Юсэм онлайн.\n\n' +
-        '/help — помощь\n' +
-        '/clear — очистить память\n' +
-        '/status — состояние бота'
-    );
-});
-
-// ============================================================
-// 3. /HELP
-// ============================================================
-
-bot.command('help', async ctx => {
-    if (!isOwnerPrivate(ctx)) {
-        return;
-    }
-
-    await ctx.reply(
-        '🛠 Управление Юсэмом:\n\n' +
-        '/clear — очистить память AI\n' +
-        '/status — состояние бота\n\n' +
-        'Ответь на сообщение радара — ' +
-        'ответ уйдёт в группу с цитированием.\n\n' +
-        'Просто напиши мне сообщение — ' +
-        'оно уйдёт в группу.'
-    );
-});
-
-// ============================================================
-// 4. /CLEAR
-// ============================================================
-
-bot.command('clear', async ctx => {
-    if (!isOwnerPrivate(ctx)) {
-        return;
-    }
-
-    clearHistory(GROUP_ID);
-
-    await ctx.reply(
-        '🧠 Память Юсэма очищена.'
-    );
-});
-
-// ============================================================
-// 5. /STATUS
-// ============================================================
-
-bot.command('status', async ctx => {
-    if (!isOwnerPrivate(ctx)) {
-        return;
-    }
-
-    const historyLength =
-        getHistory(GROUP_ID).length;
-
-    await ctx.reply(
-        `🟢 Юсэм работает\n` +
-        `⏱ Uptime: ${Math.floor(process.uptime())} сек.\n` +
-        `🧠 Память: ${historyLength} сообщений\n\n` +
-        `🤖 Fallback модели:\n` +
-        GEMINI_MODELS
-            .map(
-                (model, index) =>
-                    `${index + 1}. ${model}`
-            )
-            .join('\n')
-    );
-});
-
-// ============================================================
-// 6. РУЧНОЕ УПРАВЛЕНИЕ ИЗ ЛИЧКИ
-// ============================================================
-
-bot.on('text', async (ctx, next) => {
-    if (!isOwnerPrivate(ctx)) {
-        return next();
+        return false;
     }
 
     const text =
-        ctx.message.text?.trim();
+        ctx.message?.text?.trim();
 
-    if (!text) {
-        return next();
+    if (!text?.startsWith('/')) {
+        return false;
+    }
+
+    const command =
+        text
+            .split(/\s+/)[0]
+            .split('@')[0]
+            .toLowerCase();
+
+    // --------------------------------------------
+    // /start
+    // --------------------------------------------
+
+    if (command === '/start') {
+        await ctx.reply(
+            '🏎️ Юсэм онлайн.\n\n' +
+            '/help — помощь\n' +
+            '/clear — очистить память\n' +
+            '/status — состояние бота'
+        );
+
+        return true;
+    }
+
+    // --------------------------------------------
+    // /help
+    // --------------------------------------------
+
+    if (command === '/help') {
+        await ctx.reply(
+            '🛠 Управление:\n\n' +
+            '/clear — очистить память AI\n' +
+            '/status — состояние\n\n' +
+            'Ответь на сообщение радара — ' +
+            'ответ уйдёт в группу с цитированием.\n\n' +
+            'Просто напиши текст мне — ' +
+            'он уйдёт в группу.'
+        );
+
+        return true;
+    }
+
+    // --------------------------------------------
+    // /clear
+    // --------------------------------------------
+
+    if (command === '/clear') {
+        clearHistory(GROUP_ID);
+
+        await ctx.reply(
+            '🧠 Память Юсэма очищена.'
+        );
+
+        console.log(
+            '🧹 [MEMORY] История очищена'
+        );
+
+        return true;
+    }
+
+    // --------------------------------------------
+    // /status
+    // --------------------------------------------
+
+    if (command === '/status') {
+        const historyLength =
+            getHistory(GROUP_ID).length;
+
+        const cooldownModels =
+            GEMINI_MODELS.filter(
+                model => isModelOnCooldown(model)
+            );
+
+        let message =
+            `🟢 Юсэм работает\n\n` +
+            `⏱ Uptime: ` +
+            `${Math.floor(process.uptime())} сек.\n` +
+            `🧠 Память: ` +
+            `${historyLength} сообщений\n\n` +
+            `🤖 Gemini модели:\n`;
+
+        message += GEMINI_MODELS
+            .map(
+                (model, index) => {
+                    const cooldown =
+                        isModelOnCooldown(model)
+                            ? ' ⏸️'
+                            : ' ✅';
+
+                    return (
+                        `${index + 1}. ` +
+                        `${model}${cooldown}`
+                    );
+                }
+            )
+            .join('\n');
+
+        if (cooldownModels.length) {
+            message +=
+                `\n\n⏸️ На cooldown:\n` +
+                cooldownModels.join('\n');
+        }
+
+        await ctx.reply(message);
+
+        return true;
     }
 
     /*
-     * Не обрабатываем команды как обычные сообщения.
-     * Это защищает от отправки /start, /help и т.д. в группу.
+     * Любая неизвестная команда.
+     * Не отправляем её в группу.
      */
-    if (text.startsWith('/')) {
-        return next();
+
+    return true;
+}
+
+// ============================================================
+// OWNER MESSAGE
+// ============================================================
+
+async function sendOwnerMessageToGroup(ctx) {
+    const text =
+        ctx.message?.text?.trim();
+
+    if (!text) {
+        return;
     }
 
-    // --------------------------------------------------------
-    // Ответ на сообщение радара
-    // --------------------------------------------------------
+    const replyMessage =
+        ctx.message.reply_to_message;
 
-    if (ctx.message.reply_to_message?.text) {
-        const radarText =
-            ctx.message.reply_to_message.text;
+    // --------------------------------------------
+    // Ответ через радар
+    // --------------------------------------------
+
+    if (replyMessage?.text) {
 
         const match =
-            radarText.match(/\[msg:(\d+)\]/);
+            replyMessage.text.match(
+                /\[msg:(\d+)\]/
+            );
 
         if (match) {
             const targetMessageId =
@@ -487,7 +674,8 @@ bot.on('text', async (ctx, next) => {
                     text,
                     {
                         reply_parameters: {
-                            message_id: targetMessageId
+                            message_id:
+                                targetMessageId
                         }
                     }
                 );
@@ -496,10 +684,15 @@ bot.on('text', async (ctx, next) => {
                     '✅ Ответ отправлен с цитированием.'
                 );
 
+                console.log(
+                    `📤 [OWNER] Reply → ${targetMessageId}`
+                );
+
                 return;
             } catch (error) {
+
                 console.error(
-                    '❌ Ошибка reply:',
+                    '❌ [OWNER] Reply ошибка:',
                     error.message
                 );
 
@@ -513,9 +706,9 @@ bot.on('text', async (ctx, next) => {
         }
     }
 
-    // --------------------------------------------------------
-    // Обычное сообщение в группу
-    // --------------------------------------------------------
+    // --------------------------------------------
+    // Обычное сообщение
+    // --------------------------------------------
 
     try {
         await ctx.telegram.sendMessage(
@@ -527,11 +720,14 @@ bot.on('text', async (ctx, next) => {
             '✅ Отправлено в группу.'
         );
 
-        return;
+        console.log(
+            '📤 [OWNER] Сообщение отправлено'
+        );
 
     } catch (error) {
+
         console.error(
-            '❌ Ошибка отправки:',
+            '❌ [OWNER] Ошибка:',
             error.message
         );
 
@@ -539,41 +735,45 @@ bot.on('text', async (ctx, next) => {
             '❌ Не удалось отправить сообщение.'
         );
     }
-});
+}
 
 // ============================================================
-// 7. AI ЮСЭМ
+// AI
 // ============================================================
 
-bot.on('text', async ctx => {
+async function handleAI(ctx) {
     try {
+
+        // --------------------------------------------
         // Только наша группа
+        // --------------------------------------------
+
         if (!isGroupMessage(ctx)) {
             return;
         }
 
-        // Игнорируем сообщения от ботов
+        // --------------------------------------------
+        // Игнорируем ботов
+        // --------------------------------------------
+
         if (isBotMessage(ctx)) {
+            console.log(
+                '🤖 [AI] Игнорируем сообщение бота'
+            );
+
             return;
         }
 
         const text =
-            ctx.message.text?.trim();
+            ctx.message?.text?.trim();
 
         if (!text) {
             return;
         }
 
-        /*
-         * Не обрабатываем команды.
-         */
-        if (text.startsWith('/')) {
-            return;
-        }
-
-        // ----------------------------------------------------
-        // Проверяем, нужно ли отвечать
-        // ----------------------------------------------------
+        // --------------------------------------------
+        // Проверка упоминания
+        // --------------------------------------------
 
         const mentioned =
             isMentioned(text);
@@ -582,12 +782,47 @@ bot.on('text', async ctx => {
             isReplyToBot(ctx);
 
         console.log(
-            `🔎 AI check | text="${text}" | ` +
-            `mentioned=${mentioned} | ` +
-            `repliedToBot=${repliedToBot}`
+            '========================================'
+        );
+
+        console.log(
+            '🧪 [AI DEBUG]'
+        );
+
+        console.log(
+            `Text: ${text}`
+        );
+
+        console.log(
+            `Chat ID: ${ctx.chat?.id}`
+        );
+
+        console.log(
+            `User ID: ${ctx.from?.id}`
+        );
+
+        console.log(
+            `Mentioned: ${mentioned}`
+        );
+
+        console.log(
+            `Reply to bot: ${repliedToBot}`
+        );
+
+        console.log(
+            `Bot ID: ${ctx.botInfo?.id}`
+        );
+
+        console.log(
+            '========================================'
         );
 
         if (!mentioned && !repliedToBot) {
+
+            console.log(
+                '⏭️ [AI] Ответ не требуется'
+            );
+
             return;
         }
 
@@ -596,9 +831,13 @@ bot.on('text', async ctx => {
             ctx.from?.username ||
             'Пользователь';
 
-        // ----------------------------------------------------
-        // Добавляем сообщение пользователя в память
-        // ----------------------------------------------------
+        console.log(
+            `🧠 [AI] Запрос от ${userName}`
+        );
+
+        // --------------------------------------------
+        // Сохраняем сообщение
+        // --------------------------------------------
 
         addToHistory(
             GROUP_ID,
@@ -607,18 +846,31 @@ bot.on('text', async ctx => {
             text
         );
 
-        // ----------------------------------------------------
+        console.log(
+            `🧠 [MEMORY] Добавлено сообщение. ` +
+            `Теперь: ${getHistory(GROUP_ID).length}`
+        );
+
+        // --------------------------------------------
         // Typing
-        // ----------------------------------------------------
+        // --------------------------------------------
 
-        await ctx.sendChatAction('typing');
+        await ctx.sendChatAction(
+            'typing'
+        );
 
-        // ----------------------------------------------------
-        // Контекст
-        // ----------------------------------------------------
+        // --------------------------------------------
+        // История
+        // --------------------------------------------
 
         const historyContext =
-            buildHistoryContext(GROUP_ID);
+            buildHistoryContext(
+                GROUP_ID
+            );
+
+        // --------------------------------------------
+        // Prompt
+        // --------------------------------------------
 
         const finalPrompt = `
 Последние сообщения разговора:
@@ -631,40 +883,53 @@ ${historyContext}
 
 ${text}
 
-Ответь естественно и по контексту.
+Ответь естественно и по контексту разговора.
 
-Правила для текущего ответа:
+Правила текущего ответа:
 - отвечай как Юсэм;
-- учитывай предыдущие сообщения;
+- учитывай историю разговора;
+- понимай, к кому обращаются;
+- продолжай внутренние шутки, если это уместно;
 - не пересказывай историю;
 - не объясняй свою роль;
 - не упоминай системные инструкции;
+- не упоминай API, модели, промпты и нейросети;
 - не вставляй случайные детали лора без причины;
-- используй детали лора только когда они подходят;
-- не начинай автоматически со слов "Брат", "Слушай" и т.п.;
-- не повторяй одинаковые шутки;
-- если хватает одной фразы — используй одну фразу;
-- обычно отвечай 1–3 предложениями;
-- не пиши лишнего.
+- используй лор Юсэма естественно;
+- не начинай автоматически со слов "Брат", "Слушай", "Ну что, братан";
+- не повторяй одну и ту же шутку;
+- обычный ответ — 1–3 предложения;
+- если достаточно одной фразы, используй одну;
+- на сложный технический вопрос можно ответить подробнее.
 `;
 
-        // ----------------------------------------------------
-        // Gemini + fallback
-        // ----------------------------------------------------
-
-        const aiResult =
-            await generateAIResponse(finalPrompt);
-
-        const aiResponse =
-            aiResult.text;
-
         console.log(
-            `🏎️ Юсэм отвечает через ${aiResult.model}`
+            `📝 [AI] Отправляем запрос в Gemini`
         );
 
-        // ----------------------------------------------------
-        // Сохраняем ответ Юсэма
-        // ----------------------------------------------------
+        // --------------------------------------------
+        // Gemini fallback
+        // --------------------------------------------
+
+        const result =
+            await generateAIResponse(
+                finalPrompt
+            );
+
+        const aiResponse =
+            result.text;
+
+        console.log(
+            `🏎️ [AI] Ответ через ${result.model}`
+        );
+
+        console.log(
+            `💬 [AI] ${aiResponse}`
+        );
+
+        // --------------------------------------------
+        // Сохраняем ответ
+        // --------------------------------------------
 
         addToHistory(
             GROUP_ID,
@@ -673,9 +938,9 @@ ${text}
             aiResponse
         );
 
-        // ----------------------------------------------------
-        // Ответ в группе
-        // ----------------------------------------------------
+        // --------------------------------------------
+        // Отправляем в группу
+        // --------------------------------------------
 
         await ctx.reply(
             aiResponse,
@@ -687,29 +952,162 @@ ${text}
             }
         );
 
+        console.log(
+            '✅ [AI] Ответ отправлен в Telegram'
+        );
+
     } catch (error) {
+
         console.error(
-            '❌ Ошибка AI:',
+            '❌ [AI] Критическая ошибка:',
+            error
+        );
+
+        /*
+         * Уведомляем владельца.
+         */
+
+        await ctx.telegram
+            .sendMessage(
+                MY_ID,
+                `⚠️ Юсэм не смог ответить.\n\n` +
+                `${error.message}`
+            )
+            .catch(() => {});
+    }
+}
+
+// ============================================================
+// MAIN ROUTER
+// ============================================================
+
+bot.on('text', async ctx => {
+
+    try {
+
+        const text =
+            ctx.message?.text?.trim();
+
+        if (!text) {
+            return;
+        }
+
+        console.log('');
+        console.log(
+            '========================================'
+        );
+
+        console.log(
+            '📨 [UPDATE]'
+        );
+
+        console.log(
+            `Chat ID: ${ctx.chat?.id}`
+        );
+
+        console.log(
+            `Chat type: ${ctx.chat?.type}`
+        );
+
+        console.log(
+            `From ID: ${ctx.from?.id}`
+        );
+
+        console.log(
+            `Text: ${text}`
+        );
+
+        console.log(
+            '========================================'
+        );
+
+        // ====================================================
+        // OWNER PRIVATE
+        // ====================================================
+
+        if (isOwnerPrivate(ctx)) {
+
+            console.log(
+                '👤 [ROUTER] Сообщение владельца'
+            );
+
+            const commandHandled =
+                await handleOwnerCommand(
+                    ctx
+                );
+
+            if (commandHandled) {
+                return;
+            }
+
+            /*
+             * Не команды отправляем в группу.
+             */
+
+            await sendOwnerMessageToGroup(
+                ctx
+            );
+
+            return;
+        }
+
+        // ====================================================
+        // GROUP
+        // ====================================================
+
+        if (isGroupMessage(ctx)) {
+
+            console.log(
+                '👥 [ROUTER] Сообщение группы'
+            );
+
+            /*
+             * Радар всегда работает.
+             */
+
+            await sendRadarMessage(ctx);
+
+            /*
+             * AI отдельно.
+             */
+
+            await handleAI(ctx);
+
+            return;
+        }
+
+        // ====================================================
+        // OTHER
+        // ====================================================
+
+        console.log(
+            'ℹ️ [ROUTER] Сообщение проигнорировано'
+        );
+
+    } catch (error) {
+
+        console.error(
+            '❌ [ROUTER] Ошибка:',
             error
         );
 
         await ctx.telegram
             .sendMessage(
                 MY_ID,
-                `⚠️ Юсэм не смог получить ответ от Gemini.\n\n` +
-                `${error.message}`
+                `⚠️ Ошибка роутера:\n\n${error.message}`
             )
             .catch(() => {});
     }
 });
 
 // ============================================================
-// GLOBAL TELEGRAF ERROR
+// GLOBAL TELEGRAM ERROR
 // ============================================================
 
 bot.catch((error, ctx) => {
+
     console.error(
-        '❌ Глобальная ошибка Telegraf:',
+        '❌ [TELEGRAF] Глобальная ошибка:',
         error
     );
 
@@ -717,7 +1115,7 @@ bot.catch((error, ctx) => {
         ctx.telegram
             .sendMessage(
                 MY_ID,
-                `⚠️ Ошибка Telegram-бота:\n\n${error.message}`
+                `⚠️ Ошибка Telegram:\n\n${error.message}`
             )
             .catch(() => {});
     }
@@ -728,37 +1126,62 @@ bot.catch((error, ctx) => {
 // ============================================================
 
 async function start() {
+
     try {
-        console.log('');
-        console.log('====================================');
-        console.log('🏎️  ЮСЭМ / ЮМАК');
-        console.log('====================================');
-        console.log(`👤 Owner ID: ${MY_ID}`);
-        console.log(`👥 Group ID: ${GROUP_ID}`);
-        console.log('');
-        console.log('🤖 Gemini fallback chain:');
-
-        GEMINI_MODELS.forEach((model, index) => {
-            console.log(
-                `   ${index + 1}. ${model}`
-            );
-        });
 
         console.log('');
-        console.log('🚀 Запускаем Telegram...');
+        console.log(
+            '========================================'
+        );
+
+        console.log(
+            '🏎️  ЮСЭМ / ЮМАК'
+        );
+
+        console.log(
+            '========================================'
+        );
+
+        console.log(
+            `👤 Owner ID: ${MY_ID}`
+        );
+
+        console.log(
+            `👥 Group ID: ${GROUP_ID}`
+        );
+
+        console.log('');
+        console.log(
+            '🤖 Gemini models:'
+        );
+
+        GEMINI_MODELS.forEach(
+            (model, index) => {
+                console.log(
+                    `   ${index + 1}. ${model}`
+                );
+            }
+        );
+
+        console.log('');
+        console.log(
+            '🚀 Запускаем Telegram...'
+        );
 
         await bot.launch();
 
         console.log(
-            '✅ Telegram bot запущен'
+            `✅ Telegram bot запущен`
         );
 
         console.log(
-            '===================================='
+            '========================================'
         );
+
         console.log('');
 
     } catch (error) {
+
         console.error(
             '❌ Не удалось запустить бота:',
             error
@@ -775,20 +1198,23 @@ async function start() {
 // ============================================================
 
 function shutdown(signal) {
+
     console.log(
-        `🛑 Получен ${signal}. Останавливаем бота...`
+        `🛑 Получен ${signal}. ` +
+        `Останавливаем бота...`
     );
 
     try {
         bot.stop(signal);
     } catch (error) {
         console.error(
-            '⚠️ Ошибка остановки Telegraf:',
+            '⚠️ Ошибка остановки:',
             error.message
         );
     }
 
     server.close(() => {
+
         console.log(
             '✅ HTTP сервер остановлен.'
         );
@@ -812,4 +1238,3 @@ process.once(
 // ============================================================
 
 start();
-
