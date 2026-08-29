@@ -6,6 +6,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 // Инициализация бота и AI
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Оставляем пока gemini-pro, чтобы запустить код и проверить доступные модели
 const aiModel = genAI.getGenerativeModel({ model: "gemini-pro" });
 
 // Настройки ID
@@ -50,6 +51,28 @@ bot.on('text', async (ctx, next) => {
         }
     }
     return next();
+});
+
+// --- ДИАГНОСТИКА: СПИСОК ДОСТУПНЫХ МОДЕЛЕЙ GOOGLE ---
+bot.command('models', async (ctx) => {
+    try {
+        await ctx.reply('⏳ Запрашиваю список моделей у Google...');
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+        const data = await response.json();
+        
+        if (data.models) {
+            const availableModels = data.models
+                .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+                .map(m => m.name.replace('models/', ''))
+                .join('\n');
+            
+            await ctx.reply(`✅ Доступные модели для вашего ключа:\n\n${availableModels}`);
+        } else {
+            await ctx.reply(`❌ Странный ответ от сервера: ${JSON.stringify(data)}`);
+        }
+    } catch (err) {
+        await ctx.reply(`❌ Ошибка сети: ${err.message}`);
+    }
 });
 
 // --- 3. ИСКУССТВЕННЫЙ ИНТЕЛЛЕКТ И ЛИЧНОСТЬ БОТА ---
