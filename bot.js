@@ -6,7 +6,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 // Инициализация бота и AI
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+const aiModel = genAI.getGenerativeModel({ model: "gemini-pro" });
 
 // Настройки ID
 const MY_ID = 141824902; // Ваш ID
