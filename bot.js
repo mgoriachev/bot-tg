@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 const { Telegraf } = require('telegraf');
@@ -30,37 +29,22 @@ const GROUP_ID = -5278268745;
 
 const PORT = Number(process.env.PORT) || 3000;
 
-/*
- * Порядок fallback-моделей.
- *
- * Можно переопределить через Render Environment Variables:
- *
- * GEMINI_MODELS=gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite
- */
+// Порядок fallback-моделей.
+// Можно переопределить на Render через GEMINI_MODELS.
 const GEMINI_MODELS = (
     process.env.GEMINI_MODELS ||
-    [
-        'gemini-3.7-flash',
-        'gemini-3.6-flash',
-        'gemini-3.5-flash',
-        'gemini-3.5-flash-lite'
-    ].join(',')
+    'gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite'
 )
     .split(',')
     .map(model => model.trim())
     .filter(Boolean);
 
-// Сколько сообщений хранить в памяти.
+// Память
 const MAX_HISTORY = 20;
-
-// Максимальный размер истории в символах.
 const MAX_CONTEXT_CHARS = 12000;
 
-// Сколько раз попробовать одну модель,
-// если ошибка временная.
+// Retry одной модели
 const RETRIES_PER_MODEL = 1;
-
-// Пауза между повторными попытками.
 const RETRY_DELAY_MS = 1200;
 
 // ============================================================
@@ -74,10 +58,6 @@ const bot = new Telegraf(BOT_TOKEN);
 // ============================================================
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-/*
- * Создаём отдельный объект модели для каждой модели из fallback-цепочки.
- */
 
 const aiModels = GEMINI_MODELS.map(modelName => ({
     name: modelName,
@@ -113,23 +93,6 @@ const server = app.listen(PORT, () => {
 // ============================================================
 // MEMORY
 // ============================================================
-
-/*
-    chatHistory:
-
-    GROUP_ID -> [
-        {
-            role: 'user',
-            name: 'Андрей',
-            text: 'Юсэм, как тебе Evo?'
-        },
-        {
-            role: 'assistant',
-            name: 'Юсэм',
-            text: 'Evo — это зло в хорошем смысле 😎'
-        }
-    ]
-*/
 
 const chatHistory = new Map();
 
@@ -178,8 +141,7 @@ function buildHistoryContext(chatId) {
         .join('\n');
 
     if (context.length > MAX_CONTEXT_CHARS) {
-        context =
-            context.slice(-MAX_CONTEXT_CHARS);
+        context = context.slice(-MAX_CONTEXT_CHARS);
     }
 
     return context;
@@ -204,13 +166,31 @@ function isBotMessage(ctx) {
     return Boolean(ctx.from?.is_bot);
 }
 
+/*
+ * ВАЖНО:
+ * Не используем \b для русских слов.
+ *
+ * Эта проверка распознаёт:
+ * Юмак
+ * юмак
+ * ЮМАК
+ * Юсэм
+ * юсэм, расскажи
+ *
+ * Но не считает упоминанием:
+ * юмака
+ * юсэмка
+ */
 function isMentioned(text = '') {
-    return /\b(юсэм|юмак)\b/iu.test(text);
+    if (!text) {
+        return false;
+    }
+
+    return /(?:^|[^а-яёa-z])(юсэм|юмак)(?=$|[^а-яёa-z])/iu.test(text);
 }
 
 function isReplyToBot(ctx) {
-    const reply =
-        ctx.message?.reply_to_message;
+    const reply = ctx.message?.reply_to_message;
 
     return Boolean(
         reply?.from?.id &&
@@ -226,24 +206,13 @@ function sleep(ms) {
 }
 
 /*
- * Определяем, стоит ли переключаться на следующую модель.
- *
- * Временные ошибки:
- * 429 — rate limit
- * 500 — server error
- * 502 — bad gateway
- * 503 — service unavailable
- * 504 — gateway timeout
- * timeout / fetch failure — временный сетевой сбой
- *
- * Для 401/403 fallback обычно не поможет,
- * потому что проблема в API key / permissions.
+ * Проверяем, является ли ошибка временной.
  */
 function isRetryableGeminiError(error) {
     const message =
         String(error?.message || '').toLowerCase();
 
-    const retryableCodes = [
+    const retryablePatterns = [
         '429',
         '500',
         '502',
@@ -258,8 +227,8 @@ function isRetryableGeminiError(error) {
         'fetching'
     ];
 
-    return retryableCodes.some(code =>
-        message.includes(code)
+    return retryablePatterns.some(pattern =>
+        message.includes(pattern)
     );
 }
 
@@ -270,10 +239,14 @@ function isRetryableGeminiError(error) {
 async function generateAIResponse(prompt) {
     let lastError = null;
 
-    for (const model of aiModels) {
-        console.log(
-            `🤖 Пробуем Gemini: ${model.name}`
+    if (!aiModels.length) {
+        throw new Error(
+            'Не настроена ни одна модель Gemini.'
         );
+    }
+
+    for (const model of aiModels) {
+        console.log(`🤖 Пробуем модель: ${model.name}`);
 
         for (
             let attempt = 1;
@@ -282,18 +255,14 @@ async function generateAIResponse(prompt) {
         ) {
             try {
                 const result =
-                    await model.instance.generateContent(
-                        prompt
-                    );
+                    await model.instance.generateContent(prompt);
 
                 const responseText =
-                    result?.response
-                        ?.text?.()
-                        ?.trim();
+                    result?.response?.text?.()?.trim();
 
                 if (!responseText) {
                     throw new Error(
-                        'Модель вернула пустой ответ.'
+                        'Gemini вернул пустой ответ.'
                     );
                 }
 
@@ -316,36 +285,25 @@ async function generateAIResponse(prompt) {
                 );
 
                 /*
-                 * Если ошибка НЕ временная,
-                 * нет смысла повторять ту же модель.
+                 * Если ошибка постоянная —
+                 * не тратим повторную попытку.
                  */
                 if (!isRetryableGeminiError(error)) {
-                    console.error(
-                        `➡️ Ошибка не считается временной. ` +
-                        `Переходим к следующей модели.`
-                    );
-
                     break;
                 }
 
                 /*
-                 * Если это временная ошибка,
-                 * даём модели ещё один шанс.
+                 * Ошибка временная —
+                 * пробуем модель ещё раз.
                  */
                 if (
                     attempt <= RETRIES_PER_MODEL
                 ) {
-                    await sleep(
-                        RETRY_DELAY_MS
-                    );
+                    await sleep(RETRY_DELAY_MS);
                 }
             }
         }
 
-        /*
-         * Эта модель не справилась.
-         * Переходим к следующей.
-         */
         console.log(
             `🔄 Переключаемся после ${model.name}`
         );
@@ -387,10 +345,7 @@ bot.use(async (ctx, next) => {
                 `🆔 [msg:${ctx.message.message_id}]`;
 
             await ctx.telegram
-                .sendMessage(
-                    MY_ID,
-                    adminText
-                )
+                .sendMessage(MY_ID, adminText)
                 .catch(error => {
                     console.error(
                         '⚠️ Ошибка отправки радара:',
@@ -503,20 +458,24 @@ bot.on('text', async (ctx, next) => {
         return next();
     }
 
+    /*
+     * Не обрабатываем команды как обычные сообщения.
+     * Это защищает от отправки /start, /help и т.д. в группу.
+     */
+    if (text.startsWith('/')) {
+        return next();
+    }
+
     // --------------------------------------------------------
-    // Ответ на сообщение из радара
+    // Ответ на сообщение радара
     // --------------------------------------------------------
 
-    if (
-        ctx.message.reply_to_message?.text
-    ) {
+    if (ctx.message.reply_to_message?.text) {
         const radarText =
             ctx.message.reply_to_message.text;
 
         const match =
-            radarText.match(
-                /\[msg:(\d+)\]/
-            );
+            radarText.match(/\[msg:(\d+)\]/);
 
         if (match) {
             const targetMessageId =
@@ -528,8 +487,7 @@ bot.on('text', async (ctx, next) => {
                     text,
                     {
                         reply_parameters: {
-                            message_id:
-                                targetMessageId
+                            message_id: targetMessageId
                         }
                     }
                 );
@@ -606,8 +564,15 @@ bot.on('text', async ctx => {
             return;
         }
 
+        /*
+         * Не обрабатываем команды.
+         */
+        if (text.startsWith('/')) {
+            return;
+        }
+
         // ----------------------------------------------------
-        // Определяем, нужно ли отвечать
+        // Проверяем, нужно ли отвечать
         // ----------------------------------------------------
 
         const mentioned =
@@ -615,6 +580,12 @@ bot.on('text', async ctx => {
 
         const repliedToBot =
             isReplyToBot(ctx);
+
+        console.log(
+            `🔎 AI check | text="${text}" | ` +
+            `mentioned=${mentioned} | ` +
+            `repliedToBot=${repliedToBot}`
+        );
 
         if (!mentioned && !repliedToBot) {
             return;
@@ -626,7 +597,7 @@ bot.on('text', async ctx => {
             'Пользователь';
 
         // ----------------------------------------------------
-        // Добавляем сообщение пользователя
+        // Добавляем сообщение пользователя в память
         // ----------------------------------------------------
 
         addToHistory(
@@ -637,21 +608,17 @@ bot.on('text', async ctx => {
         );
 
         // ----------------------------------------------------
-        // Показываем typing
+        // Typing
         // ----------------------------------------------------
 
         await ctx.sendChatAction('typing');
 
         // ----------------------------------------------------
-        // Собираем историю
+        // Контекст
         // ----------------------------------------------------
 
         const historyContext =
             buildHistoryContext(GROUP_ID);
-
-        // ----------------------------------------------------
-        // Prompt текущего сообщения
-        // ----------------------------------------------------
 
         const finalPrompt = `
 Последние сообщения разговора:
@@ -666,7 +633,7 @@ ${text}
 
 Ответь естественно и по контексту.
 
-Правила текущего ответа:
+Правила для текущего ответа:
 - отвечай как Юсэм;
 - учитывай предыдущие сообщения;
 - не пересказывай историю;
@@ -686,9 +653,7 @@ ${text}
         // ----------------------------------------------------
 
         const aiResult =
-            await generateAIResponse(
-                finalPrompt
-            );
+            await generateAIResponse(finalPrompt);
 
         const aiResponse =
             aiResult.text;
@@ -698,7 +663,7 @@ ${text}
         );
 
         // ----------------------------------------------------
-        // Сохраняем ответ
+        // Сохраняем ответ Юсэма
         // ----------------------------------------------------
 
         addToHistory(
@@ -727,11 +692,6 @@ ${text}
             '❌ Ошибка AI:',
             error
         );
-
-        /*
-         * Сообщаем владельцу,
-         * если все модели отказали.
-         */
 
         await ctx.telegram
             .sendMessage(
@@ -778,15 +738,14 @@ async function start() {
         console.log('');
         console.log('🤖 Gemini fallback chain:');
 
-        GEMINI_MODELS.forEach(
-            (model, index) => {
-                console.log(
-                    `   ${index + 1}. ${model}`
-                );
-            }
-        );
+        GEMINI_MODELS.forEach((model, index) => {
+            console.log(
+                `   ${index + 1}. ${model}`
+            );
+        });
 
         console.log('');
+        console.log('🚀 Запускаем Telegram...');
 
         await bot.launch();
 
@@ -817,8 +776,7 @@ async function start() {
 
 function shutdown(signal) {
     console.log(
-        `🛑 Получен ${signal}. ` +
-        `Останавливаем бота...`
+        `🛑 Получен ${signal}. Останавливаем бота...`
     );
 
     try {
@@ -854,3 +812,4 @@ process.once(
 // ============================================================
 
 start();
+
