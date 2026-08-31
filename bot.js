@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const express = require('express');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { Pool } = require('pg');
 const { SYSTEM_PROMPT } = require('./prompt');
 
 // ============================================================
@@ -23,6 +24,30 @@ for (const key of REQUIRED_ENV) {
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const DATABASE_URL = process.env.DATABASE_URL;
+
+if (!DATABASE_URL) {
+    console.error('❌ Не задана переменная DATABASE_URL');
+    process.exit(1);
+}
+
+const pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false
+    }
+});
+
+pool.query('SELECT NOW()')
+    .then(() => {
+        console.log('✅ PostgreSQL / Supabase подключён');
+    })
+    .catch(error => {
+        console.error(
+            '❌ Ошибка подключения к PostgreSQL:',
+            error.message
+        );
+    });
 
 const MY_ID = 141824902;
 const GROUP_ID = -5278268745;
