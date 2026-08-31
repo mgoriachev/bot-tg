@@ -4,6 +4,7 @@ const { Telegraf } = require("telegraf");
 const express = require("express");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { Pool } = require("pg");
+const { createClient } = require("@supabase/supabase-js");
 const { SYSTEM_PROMPT } = require("./prompt");
 
 // ============================================================
@@ -23,6 +24,20 @@ for (const key of REQUIRED_ENV) {
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL) {
+  console.error("❌ Не задана переменная SUPABASE_URL");
+  process.exit(1);
+}
+
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ Не задана переменная SUPABASE_SERVICE_ROLE_KEY");
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Твой Telegram ID
 const MY_ID = 141824902;
