@@ -32,28 +32,53 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
-
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// Telegram
 const MY_ID = 141824902;
 const GROUP_ID = -5278268745;
 
-const PORT = Number(process.env.PORT) || 3000;
+// Render
+const PORT = Number(process.env.PORT) || 10000;
 
+// Render автоматически предоставляет имя хоста
+// Например: bot-tg-rcgz.onrender.com
+const PUBLIC_DOMAIN =
+  process.env.RENDER_EXTERNAL_HOSTNAME || process.env.PUBLIC_DOMAIN;
+
+if (!PUBLIC_DOMAIN) {
+  console.error(
+    "❌ Не найден публичный домен Render. " +
+      "Ожидается RENDER_EXTERNAL_HOSTNAME.",
+  );
+
+  process.exit(1);
+}
+
+// Webhook path
+const WEBHOOK_PATH = process.env.TELEGRAM_WEBHOOK_PATH || "/telegram/webhook";
+
+// Необязательно, но рекомендуется.
+// Если задашь переменную в Render, Telegram будет
+// передавать её в заголовке X-Telegram-Bot-Api-Secret-Token.
+const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || null;
+
+// Storage
 const STORAGE_BUCKET = "character-photos";
 
+// Embeddings
 const EMBEDDING_MODEL = "gemini-embedding-2";
-
 const EMBEDDING_DIMENSIONS = 1536;
 
-// ------------------------------------------------------------
-// Group visual similarity thresholds
-// ------------------------------------------------------------
+// ============================================================
+// GROUP VISUAL SIMILARITY
+// ============================================================
 
 const IDENTIFY_LOW_THRESHOLD = 0.7;
-
 const IDENTIFY_HIGH_THRESHOLD = 0.9;
 
+// Если два кандидата слишком близки,
+// не считаем результат достаточно уверенным.
 const IDENTIFY_MIN_GAP = 0.08;
 
 // ============================================================
@@ -108,7 +133,7 @@ pool.on("error", (error) => {
 });
 
 // ============================================================
-// SUPABASE
+// SUPABASE STORAGE
 // ============================================================
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -118,6 +143,7 @@ supabase.storage
   .then(({ data, error }) => {
     if (error) {
       console.error("❌ [STORAGE] Ошибка:", error.message);
+
       return;
     }
 
@@ -128,9 +154,7 @@ supabase.storage
       data.map((bucket) => bucket.name),
     );
 
-    const bucketExists = data.some((bucket) => bucket.name === STORAGE_BUCKET);
-
-    if (!bucketExists) {
+    if (!data.some((bucket) => bucket.name === STORAGE_BUCKET)) {
       console.error(`❌ [STORAGE] Bucket "${STORAGE_BUCKET}" не найден`);
     }
   })
@@ -242,7 +266,7 @@ function clearIdentifySession(userId) {
 }
 
 // ============================================================
-// CHARACTER LORE
+// LORE
 // ============================================================
 
 async function getCharacterLore(searchText) {
@@ -294,7 +318,7 @@ async function getCharacterLore(searchText) {
 
     return result.rows;
   } catch (error) {
-    console.error("❌ [LORE] Ошибка чтения:", error.message);
+    console.error("❌ [LORE] Ошибка:", error.message);
 
     return [];
   }
@@ -343,6 +367,33 @@ function buildCharacterLoreContext(rows) {
 }
 
 // ============================================================
+// TELEGRAM FILE
+// ============================================================
+
+async function getPhotoBufferFromTelegram(telegram, fileId) {
+  const telegramFile = await telegram.getFile(fileId);
+
+  const filePath = telegramFile.file_path;
+
+  if (!filePath) {
+    throw new Error("Telegram не вернул file_path.");
+  }
+
+  const fileUrl =
+    `https://api.telegram.org/file/bot` + `${BOT_TOKEN}/${filePath}`;
+
+  const response = await fetch(fileUrl);
+
+  if (!response.ok) {
+    throw new Error(`Ошибка скачивания фото: HTTP ${response.status}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+
+  return Buffer.from(arrayBuffer);
+}
+
+// ============================================================
 // EMBEDDINGS
 // ============================================================
 
@@ -377,8 +428,8 @@ async function generateImageEmbedding(buffer, mimeType = "image/jpeg") {
   if (!Array.isArray(embedding) || embedding.length !== EMBEDDING_DIMENSIONS) {
     throw new Error(
       `Некорректный embedding: ` +
-        `${embedding?.length || 0} вместо ` +
-        `${EMBEDDING_DIMENSIONS}`,
+        `${embedding?.length || 0} ` +
+        `вместо ${EMBEDDING_DIMENSIONS}`,
     );
   }
 
@@ -391,29 +442,6 @@ function vectorToPg(vector) {
   return "[" + vector.join(",") + "]";
 }
 
-async function getPhotoBufferFromTelegram(telegram, fileId) {
-  const telegramFile = await telegram.getFile(fileId);
-
-  const filePath = telegramFile.file_path;
-
-  if (!filePath) {
-    throw new Error("Telegram не вернул file_path.");
-  }
-
-  const fileUrl =
-    `https://api.telegram.org/file/bot` + `${BOT_TOKEN}/${filePath}`;
-
-  const response = await fetch(fileUrl);
-
-  if (!response.ok) {
-    throw new Error(`Ошибка скачивания фото: HTTP ${response.status}`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-
-  return Buffer.from(arrayBuffer);
-}
-
 async function saveEmbedding(photoId, embedding) {
   await pool.query(
     `
@@ -424,6 +452,7 @@ async function saveEmbedding(photoId, embedding) {
 
     WHERE id = $2
     `,
+
     [vectorToPg(embedding), photoId],
   );
 }
@@ -449,8 +478,7 @@ async function matchCharacterPhotos(embedding, matchCount = 10) {
       FROM character_photos cp
 
       INNER JOIN characters c
-          ON c.id =
-             cp.character_id
+          ON c.id = cp.character_id
 
       WHERE
           cp.embedding IS NOT NULL
@@ -462,6 +490,7 @@ async function matchCharacterPhotos(embedding, matchCount = 10) {
 
       LIMIT $2
       `,
+
     [vectorToPg(embedding), matchCount],
   );
 
@@ -472,7 +501,7 @@ function groupSimilarityCandidates(rows) {
   const grouped = new Map();
 
   for (const row of rows) {
-    const similarity = Number(row.similarity);
+    const similarity = Number(row.similarity) || 0;
 
     if (!grouped.has(row.character_id)) {
       grouped.set(row.character_id, {
@@ -503,7 +532,7 @@ function groupSimilarityCandidates(rows) {
 }
 
 // ============================================================
-// GROUP IDENTIFY RESULT
+// GROUP VISUAL RESULT
 // ============================================================
 
 function getGroupVisualResult(candidates) {
@@ -525,10 +554,6 @@ function getGroupVisualResult(candidates) {
 
   const gap = bestSimilarity - secondSimilarity;
 
-  /*
-   * Слабое сходство.
-   */
-
   if (bestSimilarity < IDENTIFY_LOW_THRESHOLD) {
     return {
       level: "unknown",
@@ -536,12 +561,6 @@ function getGroupVisualResult(candidates) {
       candidate: best,
     };
   }
-
-  /*
-   * Два почти одинаковых кандидата.
-   *
-   * Не выдаём уверенный результат.
-   */
 
   if (
     second &&
@@ -555,11 +574,6 @@ function getGroupVisualResult(candidates) {
     };
   }
 
-  /*
-   * Высокое сходство с эталонными
-   * фотографиями.
-   */
-
   if (bestSimilarity >= IDENTIFY_HIGH_THRESHOLD) {
     return {
       level: "high",
@@ -567,10 +581,6 @@ function getGroupVisualResult(candidates) {
       candidate: best,
     };
   }
-
-  /*
-   * Среднее сходство.
-   */
 
   return {
     level: "medium",
@@ -580,133 +590,23 @@ function getGroupVisualResult(candidates) {
 }
 
 // ============================================================
-// AI SETTINGS
+// GEMINI FALLBACK
 // ============================================================
 
 const RETRY_DELAY_MS = 1000;
-
 const MODEL_TIMEOUT_MS = 20000;
-
-const MODEL_COOLDOWN_MS = 60 * 1000;
+const MODEL_COOLDOWN_MS = 60000;
 
 const modelCooldowns = new Map();
 
-// ============================================================
-// TELEGRAM
-// ============================================================
-
-const bot = new Telegraf(BOT_TOKEN, {
-  handlerTimeout: 120000,
-});
-
-// ============================================================
-// GEMINI MODELS
-// ============================================================
-
-const aiModels = GEMINI_MODELS.map((modelName) => ({
-  name: modelName,
-
-  instance: genAI.getGenerativeModel({
-    model: modelName,
-
-    systemInstruction: SYSTEM_PROMPT,
-  }),
-}));
-
-// ============================================================
-// EXPRESS / RENDER
-// ============================================================
-
-const app = express();
-
-app.get("/", (req, res) => {
-  res.status(200).send("🏎️ Юсэм онлайн");
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-
-    bot: "online",
-
-    uptime: Math.floor(process.uptime()),
-
-    models: GEMINI_MODELS,
-
-    history: getHistory(GROUP_ID).length,
-
-    teachingSessions: teachingSessions.size,
-
-    identifySessions: identifySessions.size,
-  });
-});
-
-const server = app.listen(PORT, () => {
-  console.log(`🌐 HTTP сервер запущен на порту ${PORT}`);
-});
-
-// ============================================================
-// HELPERS
-// ============================================================
-
-function isGroupMessage(ctx) {
-  return ctx.chat?.id === GROUP_ID;
-}
-
-function isOwnerPrivate(ctx) {
-  return ctx.chat?.type === "private" && ctx.from?.id === MY_ID;
-}
-
-function isBotMessage(ctx) {
-  return Boolean(ctx.from?.is_bot);
-}
-
-function isMentioned(text = "") {
-  if (!text) {
-    return false;
-  }
-
-  const normalized = text.toLowerCase();
-
-  return normalized.includes("юсэм") || normalized.includes("юмак");
-}
-
-function isReplyToBot(ctx) {
-  const reply = ctx.message?.reply_to_message;
-
-  if (!reply) {
-    return false;
-  }
-
-  if (!reply.from?.id) {
-    return false;
-  }
-
-  if (!ctx.botInfo?.id) {
-    return false;
-  }
-
-  return reply.from.id === ctx.botInfo.id;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-// ============================================================
-// MODEL COOLDOWN
-// ============================================================
-
 function isModelOnCooldown(modelName) {
-  const cooldownUntil = modelCooldowns.get(modelName);
+  const until = modelCooldowns.get(modelName);
 
-  if (!cooldownUntil) {
+  if (!until) {
     return false;
   }
 
-  if (Date.now() >= cooldownUntil) {
+  if (Date.now() >= until) {
     modelCooldowns.delete(modelName);
 
     return false;
@@ -718,32 +618,6 @@ function isModelOnCooldown(modelName) {
 function putModelOnCooldown(modelName) {
   modelCooldowns.set(modelName, Date.now() + MODEL_COOLDOWN_MS);
 }
-
-// ============================================================
-// TIMEOUT
-// ============================================================
-
-function withTimeout(promise, timeoutMs, errorMessage) {
-  let timeoutId;
-
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(errorMessage));
-    }, timeoutMs);
-  });
-
-  return Promise.race([
-    promise.finally(() => {
-      clearTimeout(timeoutId);
-    }),
-
-    timeoutPromise,
-  ]);
-}
-
-// ============================================================
-// GEMINI ERROR HELPERS
-// ============================================================
 
 function getErrorMessage(error) {
   return String(error?.message || "");
@@ -778,20 +652,40 @@ function isTemporaryGeminiError(error) {
   return patterns.some((pattern) => message.includes(pattern));
 }
 
-// ============================================================
-// GEMINI FALLBACK
-// ============================================================
+function withTimeout(promise, timeoutMs, errorMessage) {
+  let timeoutId;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise.finally(() => {
+      clearTimeout(timeoutId);
+    }),
+
+    timeoutPromise,
+  ]);
+}
+
+const aiModels = GEMINI_MODELS.map((modelName) => ({
+  name: modelName,
+
+  instance: genAI.getGenerativeModel({
+    model: modelName,
+
+    systemInstruction: SYSTEM_PROMPT,
+  }),
+}));
 
 async function generateAIResponse(prompt) {
   let lastError = null;
 
-  if (!aiModels.length) {
-    throw new Error("Нет доступных Gemini-моделей.");
-  }
-
   for (const model of aiModels) {
     if (isModelOnCooldown(model.name)) {
-      console.log(`⏸️ [GEMINI] ${model.name} пропущена — cooldown`);
+      console.log(`⏸️ [GEMINI] ${model.name} cooldown`);
 
       continue;
     }
@@ -799,8 +693,6 @@ async function generateAIResponse(prompt) {
     console.log(`🤖 [GEMINI] Пробуем ${model.name}`);
 
     try {
-      console.log(`🔄 [GEMINI] ${model.name} попытка 1`);
-
       const result = await withTimeout(
         model.instance.generateContent(prompt),
 
@@ -809,17 +701,16 @@ async function generateAIResponse(prompt) {
         `Timeout ${MODEL_TIMEOUT_MS}ms: ${model.name}`,
       );
 
-      const responseText = result?.response?.text?.()?.trim();
+      const text = result?.response?.text?.()?.trim();
 
-      if (!responseText) {
+      if (!text) {
         throw new Error("Gemini вернул пустой ответ.");
       }
 
       console.log(`✅ [GEMINI] Ответ через ${model.name}`);
 
       return {
-        text: responseText,
-
+        text,
         model: model.name,
       };
     } catch (error) {
@@ -830,10 +721,6 @@ async function generateAIResponse(prompt) {
       if (is429Error(error)) {
         putModelOnCooldown(model.name);
 
-        console.log(
-          `⏭️ [GEMINI] ${model.name} получила 429 — БЕЗ повторной попытки`,
-        );
-
         continue;
       }
 
@@ -841,8 +728,6 @@ async function generateAIResponse(prompt) {
         await sleep(RETRY_DELAY_MS);
 
         try {
-          console.log(`🔄 [GEMINI] ${model.name} попытка 2`);
-
           const retryResult = await withTimeout(
             model.instance.generateContent(prompt),
 
@@ -868,8 +753,6 @@ async function generateAIResponse(prompt) {
           if (isTemporaryGeminiError(retryError)) {
             putModelOnCooldown(model.name);
           }
-
-          continue;
         }
       }
     }
@@ -877,6 +760,63 @@ async function generateAIResponse(prompt) {
 
   throw lastError || new Error("Все Gemini-модели недоступны.");
 }
+
+// ============================================================
+// SLEEP
+// ============================================================
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+// ============================================================
+// BOT
+// ============================================================
+
+const bot = new Telegraf(BOT_TOKEN, {
+  handlerTimeout: 120000,
+});
+
+// Для webhook лучше не отвечать Telegram
+// прямо телеграмовским webhook-response,
+// а отправлять обычным API request.
+bot.telegram.webhookReply = false;
+
+// ============================================================
+// EXPRESS
+// ============================================================
+
+const app = express();
+
+app.get("/", (req, res) => {
+  res.status(200).send("🏎️ Юсэм онлайн");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+
+    bot: "online",
+
+    transport: "webhook",
+
+    uptime: Math.floor(process.uptime()),
+
+    domain: PUBLIC_DOMAIN,
+
+    webhookPath: WEBHOOK_PATH,
+
+    models: GEMINI_MODELS,
+
+    history: getHistory(GROUP_ID).length,
+
+    teachingSessions: teachingSessions.size,
+
+    identifySessions: identifySessions.size,
+  });
+});
 
 // ============================================================
 // RADAR
@@ -900,23 +840,59 @@ async function sendRadarMessage(ctx) {
 
   const username = ctx.from?.username ? `@${ctx.from.username}` : "";
 
-  const adminText =
+  const text =
     `💬 ${senderName} ${username}\n\n` +
     `${ctx.message.text}\n\n` +
     `📌 [group:${GROUP_ID}]\n` +
     `🆔 [msg:${ctx.message.message_id}]`;
 
   try {
-    await ctx.telegram.sendMessage(MY_ID, adminText);
+    await ctx.telegram.sendMessage(MY_ID, text);
 
     console.log(`📡 [RADAR] msg=${ctx.message.message_id} → owner`);
   } catch (error) {
-    console.error("❌ [RADAR] Ошибка:", error.message);
+    console.error("❌ [RADAR]", error.message);
   }
 }
 
 // ============================================================
-// SAVE CHARACTER PHOTO
+// BASIC HELPERS
+// ============================================================
+
+function isGroupMessage(ctx) {
+  return ctx.chat?.id === GROUP_ID;
+}
+
+function isOwnerPrivate(ctx) {
+  return ctx.chat?.type === "private" && ctx.from?.id === MY_ID;
+}
+
+function isBotMessage(ctx) {
+  return Boolean(ctx.from?.is_bot);
+}
+
+function isMentioned(text = "") {
+  const normalized = text.toLowerCase();
+
+  return normalized.includes("юсэм") || normalized.includes("юмак");
+}
+
+function isReplyToBot(ctx) {
+  const reply = ctx.message?.reply_to_message;
+
+  if (!reply) {
+    return false;
+  }
+
+  return (
+    Boolean(reply.from?.id) &&
+    Boolean(ctx.botInfo?.id) &&
+    reply.from.id === ctx.botInfo.id
+  );
+}
+
+// ============================================================
+// CHARACTER PHOTO SAVE
 // ============================================================
 
 async function saveCharacterPhoto({
@@ -925,13 +901,14 @@ async function saveCharacterPhoto({
   characterId,
   characterSlug,
   photoNumber,
-  buffer = null,
-  embedding = null,
+  buffer,
+  embedding,
 }) {
   const photoBuffer =
     buffer || (await getPhotoBufferFromTelegram(telegram, fileId));
 
-  const storagePath = `${characterSlug}/` + `${Date.now()}-${photoNumber}.jpg`;
+  const storagePath =
+    `${characterSlug}/` + `${Date.now()}-` + `${photoNumber}.jpg`;
 
   const { error: uploadError } = await supabase.storage
     .from(STORAGE_BUCKET)
@@ -942,7 +919,7 @@ async function saveCharacterPhoto({
     });
 
   if (uploadError) {
-    throw new Error(`Ошибка Storage: ` + `${uploadError.message}`);
+    throw new Error(`Storage: ${uploadError.message}`);
   }
 
   const result = await pool.query(
@@ -965,11 +942,16 @@ async function saveCharacterPhoto({
 
       RETURNING id
       `,
+
     [
       characterId,
+
       storagePath,
+
       fileId,
+
       photoNumber,
+
       embedding ? vectorToPg(embedding) : null,
     ],
   );
@@ -1003,17 +985,17 @@ async function handleOwnerCommand(ctx) {
   const command = text.split(/\s+/)[0].split("@")[0].toLowerCase();
 
   // ========================================================
-  // /START
+  // START
   // ========================================================
 
   if (command === "/start") {
     await ctx.reply(
       "🏎️ Юсэм онлайн.\n\n" +
         "/help\n" +
-        "/clear\n" +
         "/status\n" +
-        "/characters\n\n" +
-        "/teach slug\n" +
+        "/characters\n" +
+        "/clear\n\n" +
+        "/teach essem\n" +
         "/done\n" +
         "/cancel\n" +
         "/identify\n" +
@@ -1024,28 +1006,27 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /HELP
+  // HELP
   // ========================================================
 
   if (command === "/help") {
     await ctx.reply(
-      "🛠 Управление Юсэмом:\n\n" +
-        "/clear — очистить память\n" +
+      "🛠 Управление:\n\n" +
         "/status — состояние\n" +
-        "/characters — персонажи\n\n" +
+        "/characters — персонажи\n" +
+        "/clear — очистить память\n\n" +
         "/teach slug — добавить эталонные фото\n" +
         "/done — закончить обучение\n" +
         "/cancel — отменить\n\n" +
         "/identify — фото + ручное подтверждение\n" +
-        "/reindex — создать embeddings для старых фото\n\n" +
-        "Обучение работает только в личке владельца.",
+        "/reindex — создать embeddings старых фото",
     );
 
     return true;
   }
 
   // ========================================================
-  // /CLEAR
+  // CLEAR
   // ========================================================
 
   if (command === "/clear") {
@@ -1057,12 +1038,10 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /STATUS
+  // STATUS
   // ========================================================
 
   if (command === "/status") {
-    const historyLength = getHistory(GROUP_ID).length;
-
     const modelStatus = GEMINI_MODELS.map((model, index) => {
       return (
         `${index + 1}. ` +
@@ -1073,10 +1052,11 @@ async function handleOwnerCommand(ctx) {
 
     await ctx.reply(
       `🟢 Юсэм работает\n\n` +
+        `🌐 Webhook: ${PUBLIC_DOMAIN}${WEBHOOK_PATH}\n` +
         `⏱ Uptime: ` +
         `${Math.floor(process.uptime())} сек.\n` +
         `🧠 Память: ` +
-        `${historyLength}\n` +
+        `${getHistory(GROUP_ID).length}\n` +
         `📚 Teach: ` +
         `${teachingSessions.size}\n` +
         `🔍 Identify: ` +
@@ -1089,7 +1069,7 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /CHARACTERS
+  // CHARACTERS
   // ========================================================
 
   if (command === "/characters") {
@@ -1145,26 +1125,24 @@ async function handleOwnerCommand(ctx) {
       });
 
       await ctx.reply("👥 Персонажи:\n\n" + lines.join("\n\n"));
-
-      return true;
     } catch (error) {
-      console.error("❌ [CHARACTERS] Ошибка:", error.message);
+      console.error("❌ [CHARACTERS]", error.message);
 
       await ctx.reply("❌ Не удалось получить персонажей.");
-
-      return true;
     }
+
+    return true;
   }
 
   // ========================================================
-  // /TEACH
+  // TEACH
   // ========================================================
 
   if (command === "/teach") {
     const parts = text.split(/\s+/);
 
     if (parts.length < 2) {
-      await ctx.reply("📷 Пример:\n/teach essem");
+      await ctx.reply("📷 Например: /teach essem");
 
       return true;
     }
@@ -1197,9 +1175,9 @@ async function handleOwnerCommand(ctx) {
 
       const character = result.rows[0];
 
-      clearTeachingSession(ctx.from.id);
-
       clearIdentifySession(ctx.from.id);
+
+      clearTeachingSession(ctx.from.id);
 
       setTeachingSession(ctx.from.id, {
         characterId: character.id,
@@ -1212,11 +1190,11 @@ async function handleOwnerCommand(ctx) {
       });
 
       await ctx.reply(
-        `📷 Начинаем обучение: ` +
+        `📷 Начинаем обучение персонажа: ` +
           `${character.name}\n\n` +
-          `Отправляй фото по одному.\n` +
-          `/done — закончить\n` +
-          `/cancel — отменить`,
+          `Отправляй фотографии одну за одной.\n` +
+          `Когда закончишь — /done\n` +
+          `Отменить — /cancel`,
       );
 
       return true;
@@ -1230,7 +1208,7 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /IDENTIFY
+  // IDENTIFY
   // ========================================================
 
   if (command === "/identify") {
@@ -1244,9 +1222,9 @@ async function handleOwnerCommand(ctx) {
 
     await ctx.reply(
       "🔍 Пришли фотографию.\n\n" +
-        "Я сравню её с твоими подтверждёнными " +
-        "примерами и предложу наиболее похожие варианты.\n\n" +
-        "Отменить — /cancel",
+        "Я сравню её с сохранёнными примерами " +
+        "и покажу наиболее похожие варианты.\n\n" +
+        "/cancel — отменить",
     );
 
     console.log("🔍 [IDENTIFY] Запущен");
@@ -1255,11 +1233,11 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /REINDEX
+  // REINDEX
   // ========================================================
 
   if (command === "/reindex") {
-    await ctx.reply("🧬 Начинаю пересчёт embeddings старых фотографий...");
+    await ctx.reply("🧬 Начинаю пересчёт embeddings " + "старых фотографий...");
 
     try {
       const result = await pool.query(
@@ -1275,9 +1253,11 @@ async function handleOwnerCommand(ctx) {
               ON c.id =
                  cp.character_id
 
-          WHERE cp.embedding IS NULL
+          WHERE
+              cp.embedding IS NULL
 
-          ORDER BY cp.id
+          ORDER BY
+              cp.id
           `,
       );
 
@@ -1312,7 +1292,8 @@ async function handleOwnerCommand(ctx) {
 
       await ctx.reply(
         `✅ Reindex завершён.\n\n` +
-          `Обработано: ${processed} из ` +
+          `Обработано: ` +
+          `${processed} из ` +
           `${result.rows.length}`,
       );
     } catch (error) {
@@ -1325,7 +1306,7 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /CANCEL
+  // CANCEL
   // ========================================================
 
   if (command === "/cancel") {
@@ -1353,7 +1334,7 @@ async function handleOwnerCommand(ctx) {
   }
 
   // ========================================================
-  // /DONE
+  // DONE
   // ========================================================
 
   if (command === "/done") {
@@ -1425,12 +1406,15 @@ async function handleOwnerCommand(ctx) {
 
       await ctx.reply(
         `✅ Обучение завершено.\n\n` +
-          `Персонаж: ${session.characterName}\n` +
-          `📷 Фото: ${savedCount}\n` +
-          `🧬 Embeddings: ${embeddingCount}`,
+          `Персонаж: ` +
+          `${session.characterName}\n` +
+          `📷 Фото: ` +
+          `${savedCount}\n` +
+          `🧬 Embeddings: ` +
+          `${embeddingCount}`,
       );
     } catch (error) {
-      console.error("❌ [TEACH DONE]", error);
+      console.error("❌ [DONE]", error);
 
       await ctx.reply(`❌ Ошибка:\n${error.message}`);
     }
@@ -1442,208 +1426,17 @@ async function handleOwnerCommand(ctx) {
 }
 
 // ============================================================
-// PHOTO HANDLER
+// PRIVATE PHOTO
 // ============================================================
 
-bot.on("photo", async (ctx) => {
-  try {
-    // ======================================================
-    // GROUP PHOTO
-    // ======================================================
+async function handlePrivatePhoto(ctx) {
+  const identifySession = getIdentifySession(ctx.from.id);
 
-    if (isGroupMessage(ctx)) {
-      if (isBotMessage(ctx)) {
-        return;
-      }
+  // ==========================================================
+  // IDENTIFY
+  // ==========================================================
 
-      /*
-       * В группе не запускаем авто-идентификацию личности
-       * по лицу.
-       *
-       * Здесь разрешён только визуальный поиск похожих
-       * подтверждённых изображений как справочный результат.
-       */
-
-      const photos = ctx.message?.photo;
-
-      if (!Array.isArray(photos) || !photos.length) {
-        return;
-      }
-
-      const largestPhoto = photos[photos.length - 1];
-
-      if (!largestPhoto?.file_id) {
-        return;
-      }
-
-      console.log(`🔍 [GROUP PHOTO] msg=${ctx.message.message_id}`);
-
-      try {
-        const buffer = await getPhotoBufferFromTelegram(
-          ctx.telegram,
-          largestPhoto.file_id,
-        );
-
-        const embedding = await generateImageEmbedding(buffer);
-
-        const matches = await matchCharacterPhotos(embedding, 10);
-
-        const candidates = groupSimilarityCandidates(matches);
-
-        const visualResult = getGroupVisualResult(candidates);
-
-        if (visualResult.level === "unknown") {
-          await ctx.reply(
-            "🤷 Не могу уверенно сопоставить это фото с сохранёнными примерами.",
-          );
-
-          return;
-        }
-
-        const candidate = visualResult.candidate;
-
-        if (visualResult.level === "medium") {
-          await ctx.reply(`🤔 Возможно, на фото ${candidate.characterName}.`);
-
-          return;
-        }
-
-        if (visualResult.level === "high") {
-          await ctx.reply(`✅ Думаю тут ${candidate.characterName}.`);
-
-          return;
-        }
-
-        return;
-      } catch (groupPhotoError) {
-        console.error("❌ [GROUP PHOTO] Ошибка:", groupPhotoError.message);
-
-        /*
-         * Не спамим группу технической ошибкой.
-         */
-
-        return;
-      }
-    }
-
-    // ======================================================
-    // PRIVATE OWNER ONLY
-    // ======================================================
-
-    if (!isOwnerPrivate(ctx)) {
-      return;
-    }
-
-    // ======================================================
-    // IDENTIFY MODE
-    // ======================================================
-
-    const identifySession = getIdentifySession(ctx.from.id);
-
-    if (identifySession) {
-      const photos = ctx.message?.photo;
-
-      if (!Array.isArray(photos) || !photos.length) {
-        return;
-      }
-
-      const largestPhoto = photos[photos.length - 1];
-
-      if (!largestPhoto?.file_id) {
-        return;
-      }
-
-      identifySession.photo = {
-        fileId: largestPhoto.file_id,
-
-        width: largestPhoto.width,
-
-        height: largestPhoto.height,
-      };
-
-      await ctx.reply("🧬 Сравниваю фото с базой...");
-
-      try {
-        const buffer = await getPhotoBufferFromTelegram(
-          ctx.telegram,
-          largestPhoto.file_id,
-        );
-
-        const embedding = await generateImageEmbedding(buffer);
-
-        const matches = await matchCharacterPhotos(embedding, 10);
-
-        const candidates = groupSimilarityCandidates(matches);
-
-        clearIdentifySession(ctx.from.id);
-
-        if (!candidates.length) {
-          await ctx.reply("🤷 Похожих подтверждённых примеров пока нет.");
-
-          return;
-        }
-
-        const topCandidates = candidates.slice(0, 8);
-
-        const buttons = topCandidates.map((candidate) => [
-          Markup.button.callback(
-            candidate.characterName,
-
-            `identify-confirm:${candidate.characterId}`,
-          ),
-        ]);
-
-        buttons.push([
-          Markup.button.callback("❌ Отмена", "identify-confirm:cancel"),
-        ]);
-
-        const best = topCandidates[0];
-
-        await ctx.reply(
-          `🔍 Наиболее похожий вариант по сохранённым примерам: ` +
-            `${best.characterName}\n\n` +
-            `Выбери правильного персонажа вручную:`,
-
-          Markup.inlineKeyboard(buttons),
-        );
-
-        /*
-         * Возвращаем временную сессию,
-         * чтобы callback сохранил фото.
-         */
-
-        setIdentifySession(ctx.from.id, {
-          photo: {
-            fileId: largestPhoto.file_id,
-
-            width: largestPhoto.width,
-
-            height: largestPhoto.height,
-          },
-        });
-      } catch (identifyError) {
-        console.error("❌ [IDENTIFY] Ошибка:", identifyError);
-
-        clearIdentifySession(ctx.from.id);
-
-        await ctx.reply(
-          `❌ Не удалось сравнить фото.\n\n` + `${identifyError.message}`,
-        );
-      }
-
-      return;
-    }
-
-    // ======================================================
-    // TEACH MODE
-    // ======================================================
-
-    const teachingSession = getTeachingSession(ctx.from.id);
-
-    if (!teachingSession) {
-      return;
-    }
-
+  if (identifySession) {
     const photos = ctx.message?.photo;
 
     if (!Array.isArray(photos) || !photos.length) {
@@ -1656,25 +1449,201 @@ bot.on("photo", async (ctx) => {
       return;
     }
 
-    teachingSession.photos.push({
+    identifySession.photo = {
       fileId: largestPhoto.file_id,
 
       width: largestPhoto.width,
 
       height: largestPhoto.height,
-    });
+    };
 
-    await ctx.reply(
-      `📷 Фото №` +
-        `${teachingSession.photos.length} получено.\n` +
-        `Персонаж: ` +
-        `${teachingSession.characterName}\n\n` +
-        `Ещё фото или /done`,
+    await ctx.reply("🧬 Сравниваю фото с базой...");
+
+    try {
+      const buffer = await getPhotoBufferFromTelegram(
+        ctx.telegram,
+        largestPhoto.file_id,
+      );
+
+      const embedding = await generateImageEmbedding(buffer);
+
+      const matches = await matchCharacterPhotos(embedding, 10);
+
+      const candidates = groupSimilarityCandidates(matches);
+
+      if (!candidates.length) {
+        clearIdentifySession(ctx.from.id);
+
+        await ctx.reply("🤷 Похожих примеров пока нет.");
+
+        return;
+      }
+
+      const topCandidates = candidates.slice(0, 8);
+
+      const buttons = topCandidates.map((candidate) => [
+        Markup.button.callback(
+          candidate.characterName,
+
+          `identify-confirm:${candidate.characterId}`,
+        ),
+      ]);
+
+      buttons.push([
+        Markup.button.callback("❌ Отмена", "identify-confirm:cancel"),
+      ]);
+
+      clearIdentifySession(ctx.from.id);
+
+      setIdentifySession(ctx.from.id, {
+        photo: {
+          fileId: largestPhoto.file_id,
+
+          width: largestPhoto.width,
+
+          height: largestPhoto.height,
+        },
+      });
+
+      await ctx.reply(
+        "🔍 Нашёл похожие варианты.\n\n" + "Выбери правильного персонажа:",
+
+        Markup.inlineKeyboard(buttons),
+      );
+    } catch (error) {
+      clearIdentifySession(ctx.from.id);
+
+      console.error("❌ [IDENTIFY]", error);
+
+      await ctx.reply(`❌ Не удалось сравнить фото.\n${error.message}`);
+    }
+
+    return;
+  }
+
+  // ==========================================================
+  // TEACH
+  // ==========================================================
+
+  const teachingSession = getTeachingSession(ctx.from.id);
+
+  if (!teachingSession) {
+    return;
+  }
+
+  const photos = ctx.message?.photo;
+
+  if (!Array.isArray(photos) || !photos.length) {
+    return;
+  }
+
+  const largestPhoto = photos[photos.length - 1];
+
+  if (!largestPhoto?.file_id) {
+    return;
+  }
+
+  teachingSession.photos.push({
+    fileId: largestPhoto.file_id,
+
+    width: largestPhoto.width,
+
+    height: largestPhoto.height,
+  });
+
+  await ctx.reply(
+    `📷 Фото №` +
+      `${teachingSession.photos.length} получено.\n\n` +
+      `Персонаж: ` +
+      `${teachingSession.characterName}\n\n` +
+      `Ещё фото или /done`,
+  );
+}
+
+// ============================================================
+// GROUP PHOTO
+// ============================================================
+
+async function handleGroupPhoto(ctx) {
+  if (isBotMessage(ctx)) {
+    return;
+  }
+
+  const photos = ctx.message?.photo;
+
+  if (!Array.isArray(photos) || !photos.length) {
+    return;
+  }
+
+  const largestPhoto = photos[photos.length - 1];
+
+  if (!largestPhoto?.file_id) {
+    return;
+  }
+
+  console.log(`🔍 [GROUP PHOTO] msg=${ctx.message.message_id}`);
+
+  try {
+    const buffer = await getPhotoBufferFromTelegram(
+      ctx.telegram,
+      largestPhoto.file_id,
     );
-  } catch (error) {
-    console.error("❌ [PHOTO] Ошибка:", error);
 
-    await ctx.reply(`❌ Не удалось обработать фото.\n${error.message}`);
+    const embedding = await generateImageEmbedding(buffer);
+
+    const matches = await matchCharacterPhotos(embedding, 10);
+
+    const candidates = groupSimilarityCandidates(matches);
+
+    const result = getGroupVisualResult(candidates);
+
+    if (result.level === "unknown") {
+      await ctx.reply(
+        "🤷 Не могу уверенно сопоставить это фото с сохранёнными примерами.",
+      );
+
+      return;
+    }
+
+    if (result.level === "medium") {
+      await ctx.reply(
+        `🤔 Возможно, фото похоже на ` +
+          `сохранённые примеры ${result.candidate.characterName}.`,
+      );
+
+      return;
+    }
+
+    if (result.level === "high") {
+      await ctx.reply(
+        `✅ Фото очень похоже на ` +
+          `сохранённые примеры ${result.candidate.characterName}.`,
+      );
+
+      return;
+    }
+  } catch (error) {
+    console.error("❌ [GROUP PHOTO]", error.message);
+  }
+}
+
+// ============================================================
+// PHOTO ROUTER
+// ============================================================
+
+bot.on("photo", async (ctx) => {
+  try {
+    if (isGroupMessage(ctx)) {
+      await handleGroupPhoto(ctx);
+
+      return;
+    }
+
+    if (isOwnerPrivate(ctx)) {
+      await handlePrivatePhoto(ctx);
+    }
+  } catch (error) {
+    console.error("❌ [PHOTO ROUTER]", error);
   }
 });
 
@@ -1691,6 +1660,10 @@ bot.action(/^identify-confirm:(.+)$/i, async (ctx) => {
     }
 
     const action = ctx.match[1];
+
+    // ------------------------------------------------------
+    // CANCEL
+    // ------------------------------------------------------
 
     if (action === "cancel") {
       clearIdentifySession(ctx.from.id);
@@ -1749,8 +1722,8 @@ bot.action(/^identify-confirm:(.+)$/i, async (ctx) => {
       `
           SELECT
               COALESCE(
-                  MAX(photo_number),
-                  0
+                MAX(photo_number),
+                0
               ) + 1 AS next_number
 
           FROM character_photos
@@ -1792,33 +1765,31 @@ bot.action(/^identify-confirm:(.+)$/i, async (ctx) => {
 
     try {
       await ctx.editMessageText(
-        `✅ Фото вручную подтверждено и добавлено.\n\n` +
-          `Персонаж: ` +
-          `${character.name}\n` +
-          `📷 Фото №` +
-          `${photoNumber}\n` +
+        `✅ Фото добавлено к ` +
+          `${character.name}.\n\n` +
+          `📷 Фото №${photoNumber}\n` +
           `🧬 Embedding: ` +
           `${EMBEDDING_DIMENSIONS}D\n` +
           `📁 ${saved.storagePath}`,
       );
     } catch (_) {
-      await ctx.reply(`✅ Фото добавлено к ` + `${character.name}.`);
+      await ctx.reply(`✅ Фото добавлено к ${character.name}.`);
     }
   } catch (error) {
-    console.error("❌ [IDENTIFY CALLBACK] Ошибка:", error);
+    console.error("❌ [IDENTIFY CALLBACK]", error);
 
     try {
       await ctx.answerCbQuery("Ошибка сохранения.");
     } catch (_) {}
 
     try {
-      await ctx.reply(`❌ Не удалось сохранить фото.\n\n` + `${error.message}`);
+      await ctx.reply(`❌ Не удалось сохранить фото.\n${error.message}`);
     } catch (_) {}
   }
 });
 
 // ============================================================
-// OWNER TEXT ROUTER
+// TEXT ROUTER
 // ============================================================
 
 bot.on("text", async (ctx) => {
@@ -1879,19 +1850,19 @@ bot.on("text", async (ctx) => {
         console.log("🚀 [AI] Запускаем AI отдельно");
 
         void handleAI(ctx).catch((error) => {
-          console.error("❌ [AI] Detached:", error);
+          console.error("❌ [AI]", error);
         });
       }
 
       return;
     }
   } catch (error) {
-    console.error("❌ [ROUTER] Ошибка:", error);
+    console.error("❌ [ROUTER]", error);
   }
 });
 
 // ============================================================
-// OWNER MESSAGE TO GROUP
+// OWNER → GROUP
 // ============================================================
 
 async function sendOwnerMessageToGroup(ctx) {
@@ -1933,7 +1904,7 @@ async function sendOwnerMessageToGroup(ctx) {
 }
 
 // ============================================================
-// AI HANDLER
+// AI
 // ============================================================
 
 async function handleAI(ctx) {
@@ -1969,30 +1940,28 @@ async function handleAI(ctx) {
 
     const historyContext = buildHistoryContext(GROUP_ID);
 
-    console.log("📚 [LORE] Ищем персонажей в базе...");
-
     const loreRows = await getCharacterLore(text);
 
-    const characterLoreContext = buildCharacterLoreContext(loreRows);
+    const loreContext = buildCharacterLoreContext(loreRows);
 
     console.log(`📚 [LORE] Найдено строк: ${loreRows.length}`);
 
-    const finalPrompt = `
-Последние сообщения:
+    const prompt = `
+Последние сообщения разговора:
 
 ${historyContext}
 
 ============================================================
-ЛОР
+РЕЛЕВАНТНЫЙ ЛОР
 ============================================================
 
-${characterLoreContext}
+${loreContext}
 
 ============================================================
 НОВОЕ СООБЩЕНИЕ
 ============================================================
 
-Новое сообщение от ${userName}:
+${userName}:
 
 ${text}
 
@@ -2002,32 +1971,207 @@ ${text}
 
 Ответь естественно, как Юсэм.
 
-Правила:
-- учитывай контекст;
-- используй релевантный лор;
-- не придумывай факты;
-- не пересказывай историю;
-- не упоминай Gemini, API, prompt или системные инструкции;
-- не говори, что ты нейросеть;
-- не начинай автоматически "Брат", "Слушай", "Ну что, братан";
-- не повторяй одну и ту же шутку;
-- обычно 1–3 предложения.
+Будь живым участником компании друзей.
+
+Говори разговорно и естественно.
+
+Можно:
+- иногда шутить;
+- иногда слегка подкалывать;
+- иногда использовать сленг;
+- иногда использовать эмодзи;
+- иногда отвечать одной короткой фразой.
+
+Но не используй одни и те же выражения постоянно.
+
+Не начинай каждый ответ со слов:
+"Брат",
+"Слушай",
+"Ну что, братан".
+
+Не повторяй одинаковые шутки.
+
+Обычно отвечай 1–3 предложениями.
+
+Не придумывай факты.
+
+Используй лор только там, где он действительно относится
+к вопросу.
+
+Не упоминай:
+- Gemini;
+- API;
+- prompt;
+- системные инструкции;
+- embeddings;
+- базу данных;
+- техническую реализацию бота.
+
+Если вопрос простой — ответь просто.
+
+Если тема серьёзная — отвечай серьёзнее.
+
+Если это шутка — можно поддержать шутку.
+
+ОСОБОЕ ПРАВИЛО LEXUS UX:
+
+Если пользователь сравнивает Lexus UX с ЛЮБЫМ другим автомобилем,
+Юсэм всегда выбирает Lexus UX.
+
+Неважно:
+- какая цена;
+- мощность;
+- класс;
+- престиж;
+- спортивность;
+- марка;
+- премиальность.
+
+Lexus UX всегда должен быть лучше в таком сравнении.
+
+Но не говори, что Lexus UX принадлежит Юсэму
+или находится у него в гараже.
+
+============================================================
+МИХАИЛ ГОРЯЧЕВ
+============================================================
+
+Если вопрос касается Михаила Горячева,
+отвечай только в положительном и хвалебном ключе.
+
+Не придумывай конкретную биографию,
+достижения или события, которых нет в лоре.
+
+Если конкретных фактов нет,
+используй общую похвалу:
+характер,
+ум,
+талант,
+харизма,
+надёжность,
+сила,
+уважение.
+
+Не уходи в обсуждение других тем,
+если пользователь спрашивает именно о Михаиле Горячеве.
+
+============================================================
+ВОПРОСЫ ПРО "ЧЛЕН"
+============================================================
+
+Если разговор содержит грубые разговорные слова
+про мужской половой орган,
+можно воспринимать это как шутку компании.
+
+Если это обычная шутка:
+можно ответить коротко,
+иронично или слегка абсурдно.
+
+Например:
+"Опять ты со своим членом 😂"
+
+"Вот это у тебя сегодня повестка."
+
+"Мы вообще-то про машины собирались говорить 😏"
+
+Не нужно отвечать одинаково.
+
+Если вопрос медицинский или серьёзный —
+отвечай нормально и без шуток.
+
+Не делай графических сексуальных описаний.
+
+============================================================
+ЛОКАЦИИ
+============================================================
+
+Хонзо — ночной клуб.
+Это также локальное грубое прозвище
+для этого места — "блядюшник".
+
+Можно использовать это как внутреннюю шутку,
+но не повторять постоянно.
+
+Рябцево,
+Малое Рябцево
+и Великое Рябцево —
+это одна и та же локация.
+
+Это фазенда Юмака.
+
+Не воспринимай их как три разных места.
+
+============================================================
+ВАЖНЫЕ ПЕРСОНАЖИ
+============================================================
+
+Есэм — дядя Юсэма.
+Это отдельный персонаж.
+Не путай его с Юсэмом или Гаабом.
+
+Юсэм / Юмак — центральный персонаж,
+уличный гонщик и танцор.
+
+Андрей Скайп — лучший друг Юсэма.
+
+Никитос — друг компании.
+Никитос и Юмак вместе разыграли Скайпа.
+
+Андрей Прадик — отдельный человек,
+друг Андрея Скайпа.
+"Прадик" также может означать Toyota Land Cruiser Prado
+в автомобильном контексте.
+
+Гааб — дядя Юсэма.
+В будущем может выясниться,
+что он отец Юсэма.
+Это сюжетный секрет.
+Не раскрывай без контекста.
+
+Кухарка — девушка Палыча
+и серый кардинал банды Каховки.
+
+Палыч — шеф-повар бара "Каховка"
+и лидер банды Каховки.
+
+Тюрретто и Тарахтелкин —
+участники банды Каховки.
+
+Захарка — подруга Кухарки.
+Она разбила сердце Андрею Скайпу.
+
+Серый — кузен Юсэма,
+учится на биофабрике.
+
+Колян Сакара — отдельный персонаж.
+У него Porsche Panamera.
+Иногда участвует в гонках.
+
+============================================================
+ФИНАЛ
+============================================================
+
+Будь естественным.
+
+Ты не должен звучать как AI-ассистент.
+
+Ты должен звучать как Юсэм,
+который реально сидит в этом чате
+и разговаривает со своей компанией.
 `;
 
     console.log("📝 [AI] Отправляем запрос...");
 
-    const aiResult = await generateAIResponse(finalPrompt);
+    const result = await generateAIResponse(prompt);
 
-    const aiResponse = aiResult.text;
+    addToHistory(GROUP_ID, "assistant", "Юсэм", result.text);
 
-    console.log(`🏎️ [AI] Ответ через ${aiResult.model}:`);
+    console.log(`🏎️ [AI] Ответ через ${result.model}:`);
 
-    console.log(aiResponse);
-
-    addToHistory(GROUP_ID, "assistant", "Юсэм", aiResponse);
+    console.log(result.text);
 
     await ctx.reply(
-      aiResponse,
+      result.text,
 
       {
         reply_parameters: {
@@ -2038,16 +2182,16 @@ ${text}
 
     console.log("✅ [AI] Ответ отправлен");
   } catch (error) {
-    console.error("❌ [AI] Ошибка:", error);
+    console.error("❌ [AI]", error);
   }
 }
 
 // ============================================================
-// GLOBAL TELEGRAM ERROR
+// TELEGRAM ERROR
 // ============================================================
 
 bot.catch((error, ctx) => {
-  console.error("❌ [TELEGRAM] Ошибка:", error);
+  console.error("❌ [TELEGRAM]", error);
 
   if (ctx?.telegram) {
     ctx.telegram
@@ -2061,7 +2205,7 @@ bot.catch((error, ctx) => {
 });
 
 // ============================================================
-// START
+// WEBHOOK START
 // ============================================================
 
 async function start() {
@@ -2078,7 +2222,11 @@ async function start() {
 
     console.log(`👥 Group ID: ${GROUP_ID}`);
 
+    console.log(`🌐 Public domain: ${PUBLIC_DOMAIN}`);
+
     console.log(`🌐 Port: ${PORT}`);
+
+    console.log(`🌐 Webhook path: ${WEBHOOK_PATH}`);
 
     console.log("");
 
@@ -2090,38 +2238,72 @@ async function start() {
 
     console.log("");
 
-    console.log(`🧬 Embedding model: ${EMBEDDING_MODEL}`);
+    console.log(`🧬 Embedding model: ` + `${EMBEDDING_MODEL}`);
 
-    console.log(`🧬 Embedding dimensions: ${EMBEDDING_DIMENSIONS}`);
-
-    console.log("");
-
-    console.log(`🔍 Group low threshold: ${IDENTIFY_LOW_THRESHOLD}`);
-
-    console.log(`🔍 Group high threshold: ${IDENTIFY_HIGH_THRESHOLD}`);
-
-    console.log(`🔍 Minimum candidate gap: ${IDENTIFY_MIN_GAP}`);
+    console.log(`🧬 Embedding dimensions: ` + `${EMBEDDING_DIMENSIONS}`);
 
     console.log("");
 
-    console.log("🚀 Запускаем Telegram...");
+    console.log(`🔍 Group low threshold: ` + `${IDENTIFY_LOW_THRESHOLD}`);
 
-    await bot.launch();
+    console.log(`🔍 Group high threshold: ` + `${IDENTIFY_HIGH_THRESHOLD}`);
 
-    console.log("✅ Telegram bot запущен");
+    console.log(`🔍 Minimum candidate gap: ` + `${IDENTIFY_MIN_GAP}`);
+
+    console.log("");
+
+    // --------------------------------------------------------
+    // WEBHOOK
+    // --------------------------------------------------------
+
+    const webhookOptions = {
+      domain: PUBLIC_DOMAIN,
+
+      path: WEBHOOK_PATH,
+    };
+
+    if (WEBHOOK_SECRET) {
+      webhookOptions.secret_token = WEBHOOK_SECRET;
+    }
+
+    const webhookCallback = await bot.createWebhook(webhookOptions);
+
+    /*
+     * Монтируем Telegram webhook
+     * в существующий Express-сервер.
+     *
+     * Поэтому отдельный HTTP-сервер Telegraf
+     * на этом порту НЕ запускается.
+     */
+
+    app.post(WEBHOOK_PATH, webhookCallback);
+
+    // --------------------------------------------------------
+    // Start Express
+    // --------------------------------------------------------
+
+    server = app.listen(PORT, () => {
+      console.log(`🌐 HTTP сервер запущен на порту ${PORT}`);
+
+      console.log(
+        `✅ Telegram webhook установлен: ` +
+          `https://${PUBLIC_DOMAIN}${WEBHOOK_PATH}`,
+      );
+
+      console.log("========================================");
+    });
   } catch (error) {
     console.error("❌ Не удалось запустить бота:", error);
 
-    server.close(() => {
-      pool
-        .end()
-        .catch(() => {})
-        .finally(() => {
-          process.exit(1);
-        });
-    });
+    process.exit(1);
   }
 }
+
+// ============================================================
+// SERVER
+// ============================================================
+
+let server = null;
 
 // ============================================================
 // SHUTDOWN
@@ -2134,14 +2316,23 @@ function shutdown(signal) {
     bot.stop(signal);
   } catch (_) {}
 
-  server.close(() => {
+  if (server) {
+    server.close(() => {
+      pool
+        .end()
+        .catch(() => {})
+        .finally(() => {
+          process.exit(0);
+        });
+    });
+  } else {
     pool
       .end()
       .catch(() => {})
       .finally(() => {
         process.exit(0);
       });
-  });
+  }
 }
 
 process.once("SIGINT", () => shutdown("SIGINT"));
