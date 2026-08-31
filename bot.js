@@ -1,15 +1,18 @@
 require("dotenv").config();
 
 const { Telegraf, Markup } = require("telegraf");
+
 const express = require("express");
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+
 const { GoogleGenAI } = require("@google/genai");
 
 const { Pool } = require("pg");
+
 const { createClient } = require("@supabase/supabase-js");
 
 const { SYSTEM_PROMPT } = require("./prompt");
@@ -29,18 +32,24 @@ const REQUIRED_ENV = [
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     console.error(`❌ Не задана переменная окружения: ${key}`);
+
     process.exit(1);
   }
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
 const DATABASE_URL = process.env.DATABASE_URL;
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
+
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // Telegram
 const MY_ID = 141824902;
+
 const GROUP_ID = -5278268745;
 
 // Render
@@ -51,6 +60,7 @@ const PUBLIC_DOMAIN =
 
 if (!PUBLIC_DOMAIN) {
   console.error("❌ Не найден публичный домен Render.");
+
   process.exit(1);
 }
 
@@ -65,16 +75,26 @@ const GIT_BRANCH = process.env.RENDER_GIT_BRANCH || "unknown";
 const GIT_COMMIT_SHORT =
   GIT_COMMIT !== "unknown" ? GIT_COMMIT.slice(0, 8) : "unknown";
 
-// Webhook
+// ============================================================
+// WEBHOOK
+// ============================================================
+
 const WEBHOOK_PATH = process.env.TELEGRAM_WEBHOOK_PATH || "/telegram/webhook";
 
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || null;
 
-// Storage
+// ============================================================
+// STORAGE
+// ============================================================
+
 const STORAGE_BUCKET = "character-photos";
 
-// Embeddings
+// ============================================================
+// EMBEDDINGS
+// ============================================================
+
 const EMBEDDING_MODEL = "gemini-embedding-2";
+
 const EMBEDDING_DIMENSIONS = 1536;
 
 // ============================================================
@@ -82,7 +102,9 @@ const EMBEDDING_DIMENSIONS = 1536;
 // ============================================================
 
 const IDENTIFY_LOW_THRESHOLD = 0.7;
+
 const IDENTIFY_HIGH_THRESHOLD = 0.9;
+
 const IDENTIFY_MIN_GAP = 0.08;
 
 // ============================================================
@@ -90,6 +112,7 @@ const IDENTIFY_MIN_GAP = 0.08;
 // ============================================================
 
 const AUDIO_TRANSCRIBE_MODEL = "gemini-3.5-transcribe";
+
 const AUDIO_MAX_SECONDS = Number(process.env.AUDIO_MAX_SECONDS) || 180;
 
 // ============================================================
@@ -97,7 +120,9 @@ const AUDIO_MAX_SECONDS = Number(process.env.AUDIO_MAX_SECONDS) || 180;
 // ============================================================
 
 const MODEL_TIMEOUT_MS = 20000;
+
 const MODEL_COOLDOWN_MS = 60000;
+
 const RETRY_DELAY_MS = 1000;
 
 // ============================================================
@@ -105,6 +130,7 @@ const RETRY_DELAY_MS = 1000;
 // ============================================================
 
 const MAX_HISTORY = 20;
+
 const MAX_CONTEXT_CHARS = 12000;
 
 // ============================================================
@@ -139,7 +165,9 @@ const pool = new Pool({
   },
 
   max: 5,
+
   idleTimeoutMillis: 30000,
+
   connectionTimeoutMillis: 10000,
 });
 
@@ -167,6 +195,7 @@ supabase.storage
   .then(({ data, error }) => {
     if (error) {
       console.error("❌ [STORAGE] Ошибка:", error.message);
+
       return;
     }
 
@@ -205,7 +234,7 @@ const bot = new Telegraf(BOT_TOKEN, {
   handlerTimeout: 120000,
 });
 
-// Webhook mode
+// ВАЖНО: webhook, не polling
 bot.telegram.webhookReply = false;
 
 // ============================================================
@@ -267,7 +296,11 @@ function buildHistoryContext(chatId) {
 // ============================================================
 
 const teachingSessions = new Map();
+
 const identifySessions = new Map();
+
+// Обучение исправлений аудио
+const audioCorrectionSessions = new Map();
 
 function getTeachingSession(userId) {
   return teachingSessions.get(userId);
@@ -369,10 +402,12 @@ async function getCharacterLore(searchText) {
         FROM characters c
 
         INNER JOIN character_aliases a
-            ON a.character_id = c.id
+            ON a.character_id =
+               c.id
 
         LEFT JOIN character_lore l
-            ON l.character_id = c.id
+            ON l.character_id =
+               c.id
 
         WHERE
             lower($1)
@@ -384,7 +419,7 @@ async function getCharacterLore(searchText) {
             l.importance DESC NULLS LAST,
             c.id ASC,
             l.id ASC
-      `,
+        `,
       [loreSearchText],
     );
 
@@ -407,7 +442,9 @@ function buildCharacterLoreContext(rows) {
     if (!grouped.has(row.id)) {
       grouped.set(row.id, {
         name: row.name,
+
         description: row.description || "",
+
         facts: [],
       });
     }
@@ -483,6 +520,7 @@ async function generateImageEmbedding(buffer, mimeType = "image/jpeg") {
       {
         inlineData: {
           mimeType,
+
           data: buffer.toString("base64"),
         },
       },
@@ -509,7 +547,7 @@ async function generateImageEmbedding(buffer, mimeType = "image/jpeg") {
 }
 
 function vectorToPg(vector) {
-  return `[${vector.join(",")}]`;
+  return "[" + vector.join(",") + "]";
 }
 
 async function saveEmbedding(photoId, embedding) {
@@ -556,9 +594,11 @@ async function matchCharacterPhotos(embedding, matchCount = 10) {
           FROM character_photos cp
 
           INNER JOIN characters c
-              ON c.id = cp.character_id
+              ON c.id =
+                 cp.character_id
 
-          WHERE cp.embedding IS NOT NULL
+          WHERE
+              cp.embedding IS NOT NULL
 
           ORDER BY
               cp.embedding
@@ -634,6 +674,7 @@ function getGroupVisualResult(candidates) {
   if (!candidates.length) {
     return {
       level: "unknown",
+
       candidate: null,
     };
   }
@@ -651,6 +692,7 @@ function getGroupVisualResult(candidates) {
   if (bestSimilarity < IDENTIFY_LOW_THRESHOLD) {
     return {
       level: "unknown",
+
       candidate: best,
     };
   }
@@ -662,6 +704,7 @@ function getGroupVisualResult(candidates) {
   ) {
     return {
       level: "unknown",
+
       candidate: best,
     };
   }
@@ -669,12 +712,14 @@ function getGroupVisualResult(candidates) {
   if (bestSimilarity >= IDENTIFY_HIGH_THRESHOLD) {
     return {
       level: "high",
+
       candidate: best,
     };
   }
 
   return {
     level: "medium",
+
     candidate: best,
   };
 }
@@ -702,7 +747,7 @@ function withTimeout(promise, timeoutMs, message) {
 }
 
 // ============================================================
-// GEMINI ERROR HELPERS
+// GEMINI ERRORS
 // ============================================================
 
 function getErrorMessage(error) {
@@ -761,7 +806,7 @@ function putModelOnCooldown(modelName) {
 }
 
 // ============================================================
-// GEMINI AI MODELS
+// AI MODELS
 // ============================================================
 
 const aiModels = GEMINI_MODELS.map((modelName) => ({
@@ -775,7 +820,7 @@ const aiModels = GEMINI_MODELS.map((modelName) => ({
 }));
 
 // ============================================================
-// GEMINI RESPONSE
+// AI FALLBACK
 // ============================================================
 
 async function generateAIResponse(prompt) {
@@ -793,7 +838,9 @@ async function generateAIResponse(prompt) {
     try {
       const result = await withTimeout(
         model.instance.generateContent(prompt),
+
         MODEL_TIMEOUT_MS,
+
         `Timeout ${MODEL_TIMEOUT_MS}ms: ${model.name}`,
       );
 
@@ -807,6 +854,7 @@ async function generateAIResponse(prompt) {
 
       return {
         text,
+
         model: model.name,
       };
     } catch (error) {
@@ -816,10 +864,6 @@ async function generateAIResponse(prompt) {
 
       if (is429Error(error)) {
         putModelOnCooldown(model.name);
-
-        console.log(
-          `⏭️ [GEMINI] ${model.name} получила 429 — следующая модель`,
-        );
 
         continue;
       }
@@ -831,8 +875,6 @@ async function generateAIResponse(prompt) {
 
         continue;
       }
-
-      console.error(`⚠️ [GEMINI] ${model.name} — переходим к следующей модели`);
     }
   }
 
@@ -925,11 +967,13 @@ async function saveCharacterPhoto({
 
         RETURNING id
       `,
+
     [
       characterId,
       storagePath,
       fileId,
       photoNumber,
+
       embedding ? vectorToPg(embedding) : null,
     ],
   );
@@ -942,463 +986,845 @@ async function saveCharacterPhoto({
 }
 
 // ============================================================
-// OWNER COMMANDS
+// AUDIO CORRECTIONS
 // ============================================================
 
-async function handleOwnerCommand(ctx) {
-  if (!isOwnerPrivate(ctx)) {
-    return false;
+function normalizeCorrectionKey(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[«»"“”]/g, "")
+    .replace(/[.,!?;:()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function getAudioCorrections() {
+  try {
+    const result = await pool.query(
+      `
+          SELECT
+              id,
+              wrong_text,
+              correct_text,
+              normalized_wrong_text,
+              normalized_correct_text,
+              use_count
+
+          FROM audio_corrections
+
+          WHERE
+              normalized_wrong_text <> ''
+
+          ORDER BY
+              length(normalized_wrong_text) DESC,
+              id ASC
+        `,
+    );
+
+    return result.rows;
+  } catch (error) {
+    console.error(
+      "❌ [AUDIO CORRECTION] Ошибка загрузки правил:",
+      error.message,
+    );
+
+    return [];
+  }
+}
+
+async function applyAudioCorrections(transcript) {
+  if (!transcript) {
+    return {
+      text: transcript,
+
+      applied: [],
+    };
   }
 
-  const text = ctx.message?.text?.trim();
+  const corrections = await getAudioCorrections();
 
+  if (!corrections.length) {
+    return {
+      text: transcript,
+
+      applied: [],
+    };
+  }
+
+  let result = transcript;
+
+  const applied = [];
+
+  const fullKey = normalizeCorrectionKey(transcript);
+
+  // Сначала проверяем полное совпадение
+  const exact = corrections.find(
+    (row) => row.normalized_wrong_text === fullKey,
+  );
+
+  if (exact) {
+    result = exact.correct_text;
+
+    applied.push(exact);
+
+    await pool.query(
+      `
+        UPDATE audio_corrections
+
+        SET
+            use_count =
+              use_count + 1,
+
+            updated_at =
+              now()
+
+        WHERE id = $1
+      `,
+      [exact.id],
+    );
+
+    console.log(
+      `🧠 [AUDIO CORRECTION] Полное исправление #${exact.id}: ` +
+        `"${transcript}" → "${result}"`,
+    );
+
+    return {
+      text: result,
+
+      applied,
+    };
+  }
+
+  // Затем исправляем известные фразы внутри предложения
+  for (const correction of corrections) {
+    const wrong = correction.normalized_wrong_text;
+
+    if (!wrong || wrong.length < 2) {
+      continue;
+    }
+
+    const tokens = wrong.split(" ");
+
+    const pattern = tokens.map((token) => escapeRegExp(token)).join("\\s+");
+
+    const regex = new RegExp(pattern, "giu");
+
+    if (regex.test(result)) {
+      result = result.replace(regex, correction.correct_text);
+
+      applied.push(correction);
+
+      await pool.query(
+        `
+          UPDATE audio_corrections
+
+          SET
+              use_count =
+                use_count + 1,
+
+              updated_at =
+                now()
+
+          WHERE id = $1
+        `,
+        [correction.id],
+      );
+
+      console.log(
+        `🧠 [AUDIO CORRECTION] #${correction.id}: ` +
+          `"${correction.wrong_text}" → ` +
+          `"${correction.correct_text}"`,
+      );
+    }
+  }
+
+  return {
+    text: result,
+
+    applied,
+  };
+}
+
+async function saveAudioCorrection(wrongText, correctText) {
+  const normalizedWrong = normalizeCorrectionKey(wrongText);
+
+  const normalizedCorrect = normalizeCorrectionKey(correctText);
+
+  if (!normalizedWrong || !normalizedCorrect) {
+    throw new Error("Пустое исправление.");
+  }
+
+  const result = await pool.query(
+    `
+        INSERT INTO audio_corrections (
+            wrong_text,
+            correct_text,
+            normalized_wrong_text,
+            normalized_correct_text
+        )
+
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4
+        )
+
+        ON CONFLICT DO NOTHING
+
+        RETURNING id
+      `,
+    [wrongText.trim(), correctText.trim(), normalizedWrong, normalizedCorrect],
+  );
+
+  if (result.rows.length) {
+    console.log(
+      `✅ [AUDIO CORRECTION] Сохранено правило #${result.rows[0].id}`,
+    );
+
+    return result.rows[0].id;
+  }
+
+  // Если такая запись уже существует — обновим текст
+  const existing = await pool.query(
+    `
+        SELECT
+            id
+
+        FROM audio_corrections
+
+        WHERE
+            normalized_wrong_text = $1
+          AND
+            normalized_correct_text = $2
+
+        LIMIT 1
+      `,
+    [normalizedWrong, normalizedCorrect],
+  );
+
+  if (existing.rows.length) {
+    return existing.rows[0].id;
+  }
+
+  return null;
+}
+
+// ============================================================
+// AUDIO TRANSCRIPT
+// ============================================================
+
+function normalizeAudioTranscript(text) {
   if (!text) {
-    return false;
+    return "";
   }
 
-  if (!text.startsWith("/")) {
-    return false;
+  return text
+    .replace(/\bюсем\b/giu, "Юсэм")
+    .replace(/\bюсэм\b/giu, "Юсэм")
+    .replace(/\bюмак\b/giu, "Юмак")
+    .replace(/\bюмах\b/giu, "Юмак")
+    .trim();
+}
+
+function isAudioMentioned(text = "") {
+  const normalized = normalizeAudioTranscript(text).toLowerCase();
+
+  const variants = ["юсэм", "юсем", "юмак", "юмах"];
+
+  return variants.some((variant) => normalized.includes(variant));
+}
+
+function sanitizeAudioExtension(filePath, fallback = ".ogg") {
+  if (!filePath) {
+    return fallback;
   }
 
-  const command = text.split(/\s+/)[0].split("@")[0].toLowerCase();
+  const ext = path.extname(filePath);
 
-  // ----------------------------------------------------------
-  // /start
-  // ----------------------------------------------------------
-
-  if (command === "/start") {
-    await ctx.reply(
-      "🏎️ Юсэм онлайн.\n\n" +
-        "/help\n" +
-        "/status\n" +
-        "/characters\n" +
-        "/clear\n\n" +
-        "/teach slug\n" +
-        "/done\n" +
-        "/cancel\n" +
-        "/identify\n" +
-        "/reindex",
-    );
-
-    return true;
+  if (!ext || ext.length > 10) {
+    return fallback;
   }
 
-  // ----------------------------------------------------------
-  // /help
-  // ----------------------------------------------------------
+  return ext;
+}
 
-  if (command === "/help") {
-    await ctx.reply(
-      "🛠 Управление:\n\n" +
-        "/status — состояние\n" +
-        "/characters — персонажи\n" +
-        "/clear — память\n\n" +
-        "/teach slug — обучение фото\n" +
-        "/done — завершить\n" +
-        "/cancel — отменить\n\n" +
-        "/identify — поиск + ручное подтверждение\n" +
-        "/reindex — embeddings старых фото",
-    );
+async function transcribeAudio(ctx, fileId, mimeType = "audio/ogg") {
+  console.log("🎤 [AUDIO] Получено аудио");
 
-    return true;
+  console.log("📥 [AUDIO] Скачиваем...");
+
+  const file = await getTelegramFileInfo(ctx.telegram, fileId);
+
+  const response = await fetch(
+    `https://api.telegram.org/file/bot` + `${BOT_TOKEN}/${file.file_path}`,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Ошибка скачивания аудио: HTTP ${response.status}`);
   }
 
-  // ----------------------------------------------------------
-  // /clear
-  // ----------------------------------------------------------
+  const buffer = Buffer.from(await response.arrayBuffer());
 
-  if (command === "/clear") {
-    clearHistory(GROUP_ID);
+  console.log(`✅ [AUDIO] Скачано: ${buffer.length} bytes`);
 
-    await ctx.reply("🧠 Память очищена.");
+  const extension = sanitizeAudioExtension(file.file_path, ".ogg");
 
-    return true;
-  }
+  const tempPath = path.join(
+    os.tmpdir(),
+    `yusem-audio-${Date.now()}${extension}`,
+  );
 
-  // ----------------------------------------------------------
-  // /status
-  // ----------------------------------------------------------
+  await fs.writeFile(tempPath, buffer);
 
-  if (command === "/status") {
-    const models = GEMINI_MODELS.map(
-      (model, index) =>
-        `${index + 1}. ${model} ` + `${isModelOnCooldown(model) ? "⏸️" : "✅"}`,
-    ).join("\n");
+  try {
+    console.log("📝 [AUDIO] Загружаем в Gemini Files API...");
 
-    await ctx.reply(
-      `🟢 Юсэм работает\n\n` +
-        `📦 Версия: ${GIT_COMMIT_SHORT}\n` +
-        `🌿 Ветка: ${GIT_BRANCH}\n` +
-        `🔗 Commit: ${GIT_COMMIT}\n\n` +
-        `🌐 Webhook:\n` +
-        `https://${PUBLIC_DOMAIN}${WEBHOOK_PATH}\n\n` +
-        `⏱ Uptime: ` +
-        `${Math.floor(process.uptime())} сек.\n` +
-        `🧠 Память: ` +
-        `${getHistory(GROUP_ID).length}\n` +
-        `📚 Teach: ` +
-        `${teachingSessions.size}\n` +
-        `🔍 Identify: ` +
-        `${identifySessions.size}\n\n` +
-        `🎤 Audio: ${AUDIO_TRANSCRIBE_MODEL}\n` +
-        `🎤 Language: ru-RU\n\n` +
-        `🤖 Gemini:\n` +
-        models,
-    );
+    const uploaded = await genAIEmbeddings.files.upload({
+      file: tempPath,
 
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // /characters
-  // ----------------------------------------------------------
-
-  if (command === "/characters") {
-    try {
-      const result = await pool.query(
-        `
-            SELECT
-                c.id,
-                c.name,
-                c.slug,
-
-                COUNT(
-                  DISTINCT p.id
-                )::int AS photo_count,
-
-                COUNT(
-                  DISTINCT l.id
-                )::int AS lore_count,
-
-                COUNT(
-                  DISTINCT CASE
-                    WHEN p.embedding IS NOT NULL
-                    THEN p.id
-                  END
-                )::int AS embedding_count
-
-            FROM characters c
-
-            LEFT JOIN character_photos p
-              ON p.character_id =
-                 c.id
-
-            LEFT JOIN character_lore l
-              ON l.character_id =
-                 c.id
-
-            GROUP BY
-                c.id,
-                c.name,
-                c.slug
-
-            ORDER BY
-                c.id
-          `,
-      );
-
-      const lines = result.rows.map(
-        (row) =>
-          `${row.name}\n` +
-          `  slug: ${row.slug}\n` +
-          `  📷 Фото: ${row.photo_count}\n` +
-          `  🧬 Embeddings: ${row.embedding_count}\n` +
-          `  📚 Лор: ${row.lore_count}`,
-      );
-
-      await ctx.reply("👥 Персонажи:\n\n" + lines.join("\n\n"));
-    } catch (error) {
-      console.error("❌ [CHARACTERS]", error.message);
-
-      await ctx.reply("❌ Не удалось получить персонажей.");
-    }
-
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // /teach
-  // ----------------------------------------------------------
-
-  if (command === "/teach") {
-    const parts = text.split(/\s+/);
-
-    if (parts.length < 2) {
-      await ctx.reply("📷 Например: /teach essem");
-
-      return true;
-    }
-
-    const slug = parts[1].toLowerCase().trim();
-
-    try {
-      const result = await pool.query(
-        `
-            SELECT
-                id,
-                slug,
-                name
-
-            FROM characters
-
-            WHERE slug = $1
-
-            LIMIT 1
-          `,
-        [slug],
-      );
-
-      if (!result.rows.length) {
-        await ctx.reply(`❌ Персонаж "${slug}" не найден.`);
-
-        return true;
-      }
-
-      const character = result.rows[0];
-
-      clearIdentifySession(ctx.from.id);
-
-      clearTeachingSession(ctx.from.id);
-
-      setTeachingSession(ctx.from.id, {
-        characterId: character.id,
-
-        characterSlug: character.slug,
-
-        characterName: character.name,
-
-        photos: [],
-      });
-
-      await ctx.reply(
-        `📷 Начинаем обучение персонажа: ` +
-          `${character.name}\n\n` +
-          `Отправляй фотографии одну за одной.\n` +
-          `Когда закончишь — /done\n` +
-          `Отменить — /cancel`,
-      );
-    } catch (error) {
-      console.error("❌ [TEACH]", error);
-
-      await ctx.reply("❌ Не удалось начать обучение.");
-    }
-
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // /identify
-  // ----------------------------------------------------------
-
-  if (command === "/identify") {
-    clearTeachingSession(ctx.from.id);
-
-    clearIdentifySession(ctx.from.id);
-
-    setIdentifySession(ctx.from.id, {
-      photo: null,
+      config: {
+        mimeType: mimeType,
+      },
     });
 
+    if (!uploaded?.uri) {
+      throw new Error("Gemini Files API не вернул URI.");
+    }
+
+    console.log("✅ [AUDIO] Файл загружен в Gemini");
+
+    console.log("📝 [AUDIO] Начинаем транскрипцию...");
+
+    const interaction = await genAIEmbeddings.interactions.create({
+      model: AUDIO_TRANSCRIBE_MODEL,
+
+      input: [
+        {
+          type: "audio",
+
+          uri: uploaded.uri,
+
+          mime_type: uploaded.mimeType || mimeType,
+        },
+      ],
+
+      generation_config: {
+        transcription_config: {
+          language_codes: ["ru-RU"],
+
+          custom_vocabulary: [
+            "Юсэм",
+            "Юсем",
+            "Юмак",
+            "Юмах",
+            "Палыч",
+            "Андрей Скайп",
+            "Кухарка",
+            "Тюрретто",
+            "Тарахтелкин",
+            "Рябцево",
+            "Малое Рябцево",
+            "Великое Рябцево",
+            "Хонзо",
+            "Лексус UX",
+            "Lexus UX",
+          ],
+        },
+      },
+    });
+
+    const rawTranscript = (interaction?.output_text || "").trim();
+
+    if (!rawTranscript) {
+      throw new Error("Транскрипция вернула пустой текст.");
+    }
+
+    const normalizedTranscript = normalizeAudioTranscript(rawTranscript);
+
+    console.log(`✅ [AUDIO] Исходная транскрипция: "${rawTranscript}"`);
+
+    console.log(
+      `✅ [AUDIO] Нормализованная транскрипция: "${normalizedTranscript}"`,
+    );
+
+    return normalizedTranscript;
+  } finally {
+    try {
+      await fs.unlink(tempPath);
+    } catch (_) {}
+  }
+}
+
+// ============================================================
+// AUDIO RADAR + TRAINING
+// ============================================================
+
+async function sendAudioRadar(ctx, transcript) {
+  try {
+    const name = ctx.from?.first_name || ctx.from?.username || "Пользователь";
+
+    const username = ctx.from?.username ? `@${ctx.from.username}` : "";
+
+    const message =
+      `🎤 ${name} ${username}\n\n` +
+      `${transcript}\n\n` +
+      `📌 [group:${GROUP_ID}]\n` +
+      `🆔 [msg:${ctx.message.message_id}]`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "✅ Верно",
+          `audio-correction:ok:${ctx.message.message_id}`,
+        ),
+
+        Markup.button.callback(
+          "✏️ Исправить",
+          `audio-correction:edit:${ctx.message.message_id}`,
+        ),
+      ],
+    ]);
+
+    await ctx.telegram.sendMessage(MY_ID, message, keyboard);
+
+    console.log(`📡 [RADAR AUDIO] msg=${ctx.message.message_id} → owner`);
+  } catch (error) {
+    console.error("❌ [RADAR AUDIO]", error.message);
+  }
+}
+
+// ============================================================
+// AUDIO MESSAGE
+// ============================================================
+
+async function handleAudioMessage(ctx, fileId, mimeType) {
+  const userName = ctx.from?.first_name || ctx.from?.username || "Пользователь";
+
+  console.log("");
+
+  console.log("========================================");
+
+  console.log(`🎤 [AUDIO] msg=${ctx.message?.message_id}`);
+
+  console.log(`🎤 [AUDIO] chat=${ctx.chat?.id}`);
+
+  console.log(`🎤 [AUDIO] from=${ctx.from?.id}`);
+
+  if (!fileId) {
+    console.error("❌ [AUDIO] file_id отсутствует");
+
+    return;
+  }
+
+  try {
+    let transcript = await transcribeAudio(ctx, fileId, mimeType);
+
+    if (!transcript) {
+      return;
+    }
+
+    console.log("🧠 [AUDIO] Ищем обученные исправления...");
+
+    const correctionResult = await applyAudioCorrections(transcript);
+
+    if (correctionResult.applied.length) {
+      console.log(
+        `🧠 [AUDIO] Применено исправлений: ` +
+          `${correctionResult.applied.length}`,
+      );
+
+      transcript = correctionResult.text;
+
+      console.log(`🧠 [AUDIO] После обучения: "${transcript}"`);
+    } else {
+      console.log("🧠 [AUDIO] Подходящих обученных исправлений нет");
+    }
+
+    console.log("✅ [AUDIO] Транскрипция готова");
+
+    // --------------------------------------------------------
+    // GROUP
+    // --------------------------------------------------------
+
+    if (isGroupMessage(ctx)) {
+      const mentioned = isAudioMentioned(transcript);
+
+      const replyToBot = isReplyToBot(ctx);
+
+      console.log(
+        `🎤 [AUDIO] Mentioned=${mentioned}, ReplyToBot=${replyToBot}`,
+      );
+
+      // Всегда отправляем владельцу
+      await sendAudioRadar(ctx, transcript);
+
+      if (!mentioned && !replyToBot) {
+        console.log(
+          "🎤 [AUDIO] В группе голосовое без обращения к Юмаку — не отвечаем",
+        );
+
+        return;
+      }
+
+      console.log("🧠 [AUDIO] Передаём распознанный текст в AI");
+
+      await handleAIText(ctx, transcript, userName);
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // OWNER PRIVATE
+    // --------------------------------------------------------
+
+    if (isOwnerPrivate(ctx)) {
+      await ctx.reply(`📝 Я услышал:\n\n${transcript}`);
+
+      return;
+    }
+  } catch (error) {
+    console.error("❌ [AUDIO] Ошибка:");
+
+    console.error(error);
+
+    console.error("❌ [AUDIO] message:", error?.message);
+
+    if (isOwnerPrivate(ctx)) {
+      await ctx.reply("❌ Не удалось распознать голосовое.");
+    }
+  } finally {
+    console.log("========================================");
+  }
+}
+
+// ============================================================
+// VOICE
+// ============================================================
+
+bot.on("voice", async (ctx) => {
+  try {
+    await handleAudioMessage(ctx, ctx.message?.voice?.file_id, "audio/ogg");
+  } catch (error) {
+    console.error("❌ [VOICE]", error);
+  }
+});
+
+// ============================================================
+// AUDIO FILE
+// ============================================================
+
+bot.on("audio", async (ctx) => {
+  try {
+    const audio = ctx.message?.audio;
+
+    if (!audio?.file_id) {
+      return;
+    }
+
+    await handleAudioMessage(
+      ctx,
+      audio.file_id,
+      audio.mime_type || "audio/mpeg",
+    );
+  } catch (error) {
+    console.error("❌ [AUDIO FILE]", error);
+  }
+});
+
+// ============================================================
+// GROUP PHOTO PEOPLE COUNT
+// ============================================================
+
+async function countPeopleInImage(buffer, mimeType = "image/jpeg") {
+  console.log("👥 [PEOPLE] Определяем количество людей на фото...");
+
+  const prompt = `
+Посмотри на изображение.
+
+Определи примерное количество людей,
+которые действительно видны в кадре.
+
+Ответь строго в JSON:
+
+{
+  "people_count": 0,
+  "confidence": "high"
+}
+
+Правила:
+- считай только реально видимых людей;
+- частично видимого человека тоже считай,
+  если понятно, что это человек;
+- не считай людей на экранах,
+  фотографиях или плакатах;
+- не считай манекены и статуи;
+- если людей много, дай разумную оценку;
+- confidence: high, medium или low.
+
+Никаких комментариев вне JSON.
+`;
+
+  let lastError = null;
+
+  for (const modelName of GEMINI_MODELS) {
+    if (isModelOnCooldown(modelName)) {
+      console.log(`⏸️ [PEOPLE] ${modelName} пропущена — cooldown`);
+
+      continue;
+    }
+
+    console.log(`👥 [PEOPLE] Пробуем ${modelName}`);
+
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+      });
+
+      const result = await withTimeout(
+        model.generateContent([
+          {
+            inlineData: {
+              mimeType,
+
+              data: buffer.toString("base64"),
+            },
+          },
+
+          prompt,
+        ]),
+
+        MODEL_TIMEOUT_MS,
+
+        `Timeout ${MODEL_TIMEOUT_MS}ms: ${modelName}`,
+      );
+
+      const text = result?.response?.text?.()?.trim();
+
+      if (!text) {
+        throw new Error("Gemini не вернул ответ.");
+      }
+
+      let parsed;
+
+      try {
+        parsed = JSON.parse(
+          text
+            .replace(/^```json\s*/i, "")
+            .replace(/```$/i, "")
+            .trim(),
+        );
+      } catch (_) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+
+        if (!jsonMatch) {
+          throw new Error(`Не удалось разобрать JSON: ${text}`);
+        }
+
+        parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const count = Math.max(0, Number(parsed.people_count) || 0);
+
+      const confidence = ["high", "medium", "low"].includes(parsed.confidence)
+        ? parsed.confidence
+        : "low";
+
+      console.log(`✅ [PEOPLE] Ответ через ${modelName}`);
+
+      console.log(
+        `✅ [PEOPLE] Людей обнаружено: ${count}, confidence=${confidence}`,
+      );
+
+      return {
+        count,
+        confidence,
+        model: modelName,
+      };
+    } catch (error) {
+      lastError = error;
+
+      console.error(`❌ [PEOPLE] ${modelName}:`, error.message);
+
+      if (is429Error(error)) {
+        putModelOnCooldown(modelName);
+
+        continue;
+      }
+
+      if (isTemporaryGeminiError(error)) {
+        putModelOnCooldown(modelName);
+
+        continue;
+      }
+    }
+  }
+
+  console.error("❌ [PEOPLE] Все Gemini-модели недоступны");
+
+  if (lastError) {
+    console.error("❌ [PEOPLE] Последняя ошибка:", lastError.message);
+  }
+
+  return {
+    count: null,
+
+    confidence: "low",
+
+    model: null,
+  };
+}
+
+// ============================================================
+// GROUP PHOTO
+// ============================================================
+
+async function handleGroupPhoto(ctx) {
+  if (isBotMessage(ctx)) {
+    return;
+  }
+
+  const photos = ctx.message?.photo;
+
+  if (!Array.isArray(photos) || !photos.length) {
+    return;
+  }
+
+  const largestPhoto = photos[photos.length - 1];
+
+  if (!largestPhoto?.file_id) {
+    return;
+  }
+
+  console.log("");
+
+  console.log("========================================");
+
+  console.log(`📷 [GROUP PHOTO] msg=${ctx.message.message_id}`);
+
+  try {
+    console.log("📥 [GROUP PHOTO] Скачиваем фото...");
+
+    const buffer = await getTelegramFileBuffer(
+      ctx.telegram,
+      largestPhoto.file_id,
+    );
+
+    console.log(`✅ [GROUP PHOTO] Фото скачано: ${buffer.length} bytes`);
+
+    const peopleInfo = await countPeopleInImage(buffer);
+
+    // --------------------------------------------------------
+    // ONE PERSON
+    // --------------------------------------------------------
+
+    if (peopleInfo.count === 1) {
+      console.log("🔎 [GROUP PHOTO] Один человек — запускаем vector search");
+
+      const embedding = await generateImageEmbedding(buffer);
+
+      console.log("✅ [GROUP PHOTO] Embedding готов");
+
+      console.log("🔎 [GROUP PHOTO] Ищем похожие фотографии...");
+
+      const matches = await matchCharacterPhotos(embedding, 10);
+
+      console.log(`✅ [GROUP PHOTO] Поиск завершён. Matches=${matches.length}`);
+
+      const candidates = groupSimilarityCandidates(matches);
+
+      console.log(
+        `🔎 [GROUP PHOTO] Кандидатов персонажей: ${candidates.length}`,
+      );
+
+      for (const candidate of candidates) {
+        console.log(
+          `   → ${candidate.characterName}: ` +
+            `best=${candidate.bestSimilarity} ` +
+            `photos=${candidate.photos}`,
+        );
+      }
+
+      const result = getGroupVisualResult(candidates);
+
+      console.log(`🔎 [GROUP PHOTO] Result level=${result.level}`);
+
+      if (result.level === "unknown") {
+        await ctx.reply(
+          "🤷 Пока не могу уверенно сопоставить это фото с сохранёнными примерами.",
+        );
+
+        return;
+      }
+
+      if (result.level === "medium") {
+        await ctx.reply(
+          `🤔 Возможно, фото похоже на ` +
+            `сохранённые примеры ` +
+            `${result.candidate.characterName}.`,
+        );
+
+        return;
+      }
+
+      await ctx.reply(
+        `✅ Фото очень похоже на ` +
+          `сохранённые примеры ` +
+          `${result.candidate.characterName}.`,
+      );
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // MULTIPLE PEOPLE
+    // --------------------------------------------------------
+
+    if (peopleInfo.count !== null && peopleInfo.count >= 2) {
+      console.log(
+        `👥 [GROUP PHOTO] Групповое фото: ${peopleInfo.count} человек(а)`,
+      );
+
+      if (peopleInfo.count >= 5) {
+        await ctx.reply(
+          `👥 На фото примерно ${peopleInfo.count} человек.\n\n` +
+            `Похоже, тут целая компания 😎 ` +
+            `Отдельных участников пока не берусь ` +
+            `уверенно сопоставлять.`,
+        );
+
+        return;
+      }
+
+      await ctx.reply(
+        `👥 На фото примерно ${peopleInfo.count} человека.\n\n` +
+          `Похоже, это групповое фото. ` +
+          `Отдельных участников пока не берусь ` +
+          `уверенно сопоставлять.`,
+      );
+
+      return;
+    }
+
     await ctx.reply(
-      "🔍 Пришли фотографию.\n\n" +
-        "Я сравню её с сохранёнными " +
-        "примерами и предложу варианты.\n\n" +
-        "/cancel — отменить",
+      "🤔 Вижу фото, но не смог надёжно определить количество людей.",
     );
+  } catch (error) {
+    console.error("❌ [GROUP PHOTO] Полная ошибка:");
 
-    console.log("🔍 [IDENTIFY] Запущен");
+    console.error(error);
 
-    return true;
+    console.error("❌ [GROUP PHOTO] message:", error?.message);
+
+    console.error("❌ [GROUP PHOTO] stack:", error?.stack);
+  } finally {
+    console.log("========================================");
   }
-
-  // ----------------------------------------------------------
-  // /reindex
-  // ----------------------------------------------------------
-
-  if (command === "/reindex") {
-    console.log("🧪 [REINDEX] Команда получена");
-
-    await ctx.telegram.sendMessage(
-      ctx.chat.id,
-      "🧬 Начинаю пересчёт embeddings старых фотографий...",
-    );
-
-    try {
-      const result = await pool.query(
-        `
-            SELECT
-                cp.id,
-                cp.telegram_file_id,
-                c.name
-
-            FROM character_photos cp
-
-            INNER JOIN characters c
-                ON c.id =
-                   cp.character_id
-
-            WHERE
-                cp.embedding IS NULL
-
-            ORDER BY cp.id
-          `,
-      );
-
-      if (!result.rows.length) {
-        await ctx.reply("✅ Все фотографии уже имеют embeddings.");
-
-        return true;
-      }
-
-      let processed = 0;
-
-      for (const row of result.rows) {
-        try {
-          console.log(`🧬 [REINDEX] ${row.id}: ${row.name}`);
-
-          const buffer = await getTelegramFileBuffer(
-            ctx.telegram,
-            row.telegram_file_id,
-          );
-
-          const embedding = await generateImageEmbedding(buffer);
-
-          await saveEmbedding(row.id, embedding);
-
-          processed++;
-
-          console.log(`✅ [REINDEX] Фото ${row.id} готово`);
-        } catch (error) {
-          console.error(`❌ [REINDEX] Фото ${row.id}:`, error.message);
-        }
-      }
-
-      await ctx.reply(
-        `✅ Reindex завершён.\n\n` +
-          `Обработано: ` +
-          `${processed} из ` +
-          `${result.rows.length}`,
-      );
-    } catch (error) {
-      console.error("❌ [REINDEX]", error);
-
-      await ctx.reply(`❌ Reindex ошибка:\n${error.message}`);
-    }
-
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // /cancel
-  // ----------------------------------------------------------
-
-  if (command === "/cancel") {
-    const teaching = getTeachingSession(ctx.from.id);
-
-    const identifying = getIdentifySession(ctx.from.id);
-
-    if (teaching) {
-      clearTeachingSession(ctx.from.id);
-
-      await ctx.reply("❌ Обучение отменено.");
-    }
-
-    if (identifying) {
-      clearIdentifySession(ctx.from.id);
-
-      await ctx.reply("❌ Identify отменён.");
-    }
-
-    if (!teaching && !identifying) {
-      await ctx.reply("ℹ️ Активных сессий нет.");
-    }
-
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // /done
-  // ----------------------------------------------------------
-
-  if (command === "/done") {
-    const session = getTeachingSession(ctx.from.id);
-
-    if (!session) {
-      await ctx.reply("ℹ️ Нет активной teach-сессии.");
-
-      return true;
-    }
-
-    if (!session.photos.length) {
-      await ctx.reply("📷 Сначала отправь хотя бы одно фото.");
-
-      return true;
-    }
-
-    await ctx.reply(`⏳ Сохраняю ${session.photos.length} фото...`);
-
-    let savedCount = 0;
-    let embeddingCount = 0;
-
-    try {
-      for (let index = 0; index < session.photos.length; index++) {
-        const photo = session.photos[index];
-
-        const photoNumber = index + 1;
-
-        console.log(`📷 [TEACH] Фото ${photoNumber}`);
-
-        const buffer = await getTelegramFileBuffer(ctx.telegram, photo.fileId);
-
-        let embedding = null;
-
-        try {
-          embedding = await generateImageEmbedding(buffer);
-        } catch (error) {
-          console.error(`⚠️ [TEACH] Embedding #${photoNumber}:`, error.message);
-        }
-
-        await saveCharacterPhoto({
-          telegram: ctx.telegram,
-
-          fileId: photo.fileId,
-
-          characterId: session.characterId,
-
-          characterSlug: session.characterSlug,
-
-          photoNumber,
-
-          buffer,
-
-          embedding,
-        });
-
-        savedCount++;
-
-        if (embedding) {
-          embeddingCount++;
-        }
-      }
-
-      clearTeachingSession(ctx.from.id);
-
-      await ctx.reply(
-        `✅ Обучение завершено.\n\n` +
-          `Персонаж: ${session.characterName}\n` +
-          `📷 Фото: ${savedCount}\n` +
-          `🧬 Embeddings: ${embeddingCount}`,
-      );
-    } catch (error) {
-      console.error("❌ [DONE]", error);
-
-      await ctx.reply(`❌ Ошибка:\n${error.message}`);
-    }
-
-    return true;
-  }
-
-  return true;
 }
 
 // ============================================================
@@ -1665,691 +2091,545 @@ bot.action(/^identify-confirm:(.+)$/i, async (ctx) => {
 });
 
 // ============================================================
-// COUNT PEOPLE
+// AUDIO CORRECTION CALLBACKS
 // ============================================================
 
-async function countPeopleInImage(buffer, mimeType = "image/jpeg") {
-  console.log("👥 [PEOPLE] Определяем количество людей на фото...");
+bot.action(/^audio-correction:(ok|edit):(\d+)$/i, async (ctx) => {
+  try {
+    if (ctx.from?.id !== MY_ID) {
+      await ctx.answerCbQuery("Нет доступа.");
 
-  const prompt = `
-Посмотри на изображение.
-
-Определи примерное количество людей,
-которые действительно видны в кадре.
-
-Ответь строго в JSON:
-
-{
-  "people_count": 0,
-  "confidence": "high"
-}
-
-Правила:
-
-- считай только реально видимых людей;
-- частично видимого человека тоже считай,
-  если понятно, что это человек;
-- не считай людей на экранах,
-  фотографиях или плакатах;
-- не считай манекены и статуи;
-- если людей много, дай разумную оценку;
-- confidence: high, medium или low.
-
-Никаких комментариев вне JSON.
-`;
-
-  let lastError = null;
-
-  for (const modelName of GEMINI_MODELS) {
-    if (isModelOnCooldown(modelName)) {
-      console.log(`⏸️ [PEOPLE] ${modelName} пропущена — cooldown`);
-
-      continue;
+      return;
     }
 
-    console.log(`👥 [PEOPLE] Пробуем ${modelName}`);
+    const action = ctx.match[1];
 
-    try {
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-      });
+    const sourceMessageId = Number(ctx.match[2]);
 
-      const result = await withTimeout(
-        model.generateContent([
-          {
-            inlineData: {
-              mimeType,
-              data: buffer.toString("base64"),
-            },
-          },
-
-          prompt,
-        ]),
-        MODEL_TIMEOUT_MS,
-        `Timeout ${MODEL_TIMEOUT_MS}ms: ${modelName}`,
-      );
-
-      const text = result?.response?.text?.()?.trim();
-
-      if (!text) {
-        throw new Error("Gemini не вернул ответ.");
-      }
-
-      let parsed;
+    if (action === "ok") {
+      await ctx.answerCbQuery("Принято.");
 
       try {
-        parsed = JSON.parse(
-          text
-            .replace(/^```json\s*/i, "")
-            .replace(/```$/i, "")
-            .trim(),
-        );
-      } catch (_) {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-
-        if (!jsonMatch) {
-          throw new Error(`Не удалось разобрать JSON: ${text}`);
-        }
-
-        parsed = JSON.parse(jsonMatch[0]);
-      }
-
-      const count = Math.max(0, Number(parsed.people_count) || 0);
-
-      const confidence = ["high", "medium", "low"].includes(parsed.confidence)
-        ? parsed.confidence
-        : "low";
-
-      console.log(`✅ [PEOPLE] Ответ через ${modelName}`);
-
-      console.log(
-        `✅ [PEOPLE] Людей обнаружено: ${count}, confidence=${confidence}`,
-      );
-
-      return {
-        count,
-        confidence,
-        model: modelName,
-      };
-    } catch (error) {
-      lastError = error;
-
-      console.error(`❌ [PEOPLE] ${modelName}:`, error.message);
-
-      if (is429Error(error)) {
-        putModelOnCooldown(modelName);
-
-        console.log(`⏭️ [PEOPLE] ${modelName} получила 429 — следующая модель`);
-
-        continue;
-      }
-
-      if (isTemporaryGeminiError(error)) {
-        putModelOnCooldown(modelName);
-
-        continue;
-      }
-
-      continue;
-    }
-  }
-
-  console.error("❌ [PEOPLE] Все Gemini-модели недоступны");
-
-  if (lastError) {
-    console.error("❌ [PEOPLE] Последняя ошибка:", lastError.message);
-  }
-
-  return {
-    count: null,
-    confidence: "low",
-    model: null,
-  };
-}
-
-// ============================================================
-// GROUP PHOTO
-// ============================================================
-
-async function handleGroupPhoto(ctx) {
-  if (isBotMessage(ctx)) {
-    return;
-  }
-
-  const photos = ctx.message?.photo;
-
-  if (!Array.isArray(photos) || !photos.length) {
-    return;
-  }
-
-  const largestPhoto = photos[photos.length - 1];
-
-  if (!largestPhoto?.file_id) {
-    return;
-  }
-
-  console.log("");
-  console.log("========================================");
-
-  console.log(`📷 [GROUP PHOTO] msg=${ctx.message.message_id}`);
-
-  try {
-    console.log("📥 [GROUP PHOTO] Скачиваем фото...");
-
-    const buffer = await getTelegramFileBuffer(
-      ctx.telegram,
-      largestPhoto.file_id,
-    );
-
-    console.log(`✅ [GROUP PHOTO] Фото скачано: ${buffer.length} bytes`);
-
-    const peopleInfo = await countPeopleInImage(buffer);
-
-    // --------------------------------------------------------
-    // ONE PERSON
-    // --------------------------------------------------------
-
-    if (peopleInfo.count === 1) {
-      console.log("🔎 [GROUP PHOTO] Один человек — запускаем vector search");
-
-      const embedding = await generateImageEmbedding(buffer);
-
-      console.log("✅ [GROUP PHOTO] Embedding готов");
-
-      console.log("🔎 [GROUP PHOTO] Ищем похожие фотографии...");
-
-      const matches = await matchCharacterPhotos(embedding, 10);
-
-      console.log(`✅ [GROUP PHOTO] Поиск завершён. Matches=${matches.length}`);
-
-      const candidates = groupSimilarityCandidates(matches);
-
-      console.log(
-        `🔎 [GROUP PHOTO] Кандидатов персонажей: ${candidates.length}`,
-      );
-
-      for (const candidate of candidates) {
-        console.log(
-          `   → ${candidate.characterName}: ` +
-            `best=${candidate.bestSimilarity} ` +
-            `photos=${candidate.photos}`,
-        );
-      }
-
-      const result = getGroupVisualResult(candidates);
-
-      console.log(`🔎 [GROUP PHOTO] Result level=${result.level}`);
-
-      if (result.level === "unknown") {
-        await ctx.reply(
-          "🤷 Пока не могу уверенно сопоставить это фото с сохранёнными примерами.",
-        );
-
-        return;
-      }
-
-      if (result.level === "medium") {
-        await ctx.reply(
-          `🤔 Возможно, фото похоже на ` +
-            `сохранённые примеры ` +
-            `${result.candidate.characterName}.`,
-        );
-
-        return;
-      }
-
-      await ctx.reply(
-        `✅ Фото очень похоже на ` +
-          `сохранённые примеры ` +
-          `${result.candidate.characterName}.`,
-      );
+        await ctx.editMessageReplyMarkup(undefined);
+      } catch (_) {}
 
       return;
     }
 
-    // --------------------------------------------------------
-    // MULTIPLE PEOPLE
-    // --------------------------------------------------------
+    const currentText = ctx.update?.callback_query?.message?.text || "";
 
-    if (peopleInfo.count !== null && peopleInfo.count >= 2) {
-      console.log(
-        `👥 [GROUP PHOTO] Групповое фото: ${peopleInfo.count} человек(а)`,
-      );
+    let wrongText = "";
 
-      if (peopleInfo.count >= 5) {
-        await ctx.reply(
-          `👥 На фото примерно ${peopleInfo.count} человек.\n\n` +
-            `Похоже, тут целая компания 😎 ` +
-            `Отдельных участников пока не берусь ` +
-            `уверенно сопоставлять.`,
-        );
+    const lines = currentText.split("\n");
 
-        return;
-      }
-
-      await ctx.reply(
-        `👥 На фото примерно ${peopleInfo.count} человека.\n\n` +
-          `Похоже, это групповое фото. ` +
-          `Отдельных участников пока не берусь ` +
-          `уверенно сопоставлять.`,
-      );
-
-      return;
+    if (lines.length >= 3) {
+      wrongText = lines
+        .slice(2)
+        .filter(
+          (line) =>
+            !line.startsWith("📌 [group:") && !line.startsWith("🆔 [msg:"),
+        )
+        .join("\n")
+        .trim();
     }
+
+    if (!wrongText) {
+      wrongText = currentText;
+    }
+
+    audioCorrectionSessions.set(ctx.from.id, {
+      wrongText,
+      sourceMessageId,
+    });
+
+    await ctx.answerCbQuery("Жду правильный текст.");
 
     await ctx.reply(
-      "🤔 Вижу фото, но не смог надёжно определить количество людей.",
+      `✏️ Напиши правильную расшифровку одним сообщением.\n\n` +
+        `Сейчас:\n${wrongText}`,
     );
   } catch (error) {
-    console.error("❌ [GROUP PHOTO] Полная ошибка:");
+    console.error("❌ [AUDIO CORRECTION CALLBACK]", error);
 
-    console.error(error);
-
-    console.error("❌ [GROUP PHOTO] message:", error?.message);
-
-    console.error("❌ [GROUP PHOTO] stack:", error?.stack);
-  } finally {
-    console.log("========================================");
-  }
-}
-
-// ============================================================
-// AUDIO
-// ============================================================
-
-function sanitizeAudioExtension(filePath, fallback = ".ogg") {
-  if (!filePath) {
-    return fallback;
-  }
-
-  const ext = path.extname(filePath);
-
-  if (!ext || ext.length > 10) {
-    return fallback;
-  }
-
-  return ext;
-}
-
-function normalizeAudioTranscript(text) {
-  if (!text) {
-    return "";
-  }
-
-  return text
-    .replace(/\bюсем\b/giu, "Юсэм")
-    .replace(/\bюсэм\b/giu, "Юсэм")
-    .replace(/\bюмак\b/giu, "Юмак")
-    .replace(/\bюмах\b/giu, "Юмак")
-    .trim();
-}
-
-function isAudioMentioned(text = "") {
-  const normalized = normalizeAudioTranscript(text).toLowerCase();
-
-  const variants = ["юсэм", "юсем", "юмак", "юмах"];
-
-  return variants.some((variant) => normalized.includes(variant));
-}
-
-async function transcribeAudio(ctx, fileId, mimeType = "audio/ogg") {
-  console.log("🎤 [AUDIO] Получено аудио");
-
-  console.log("📥 [AUDIO] Скачиваем...");
-
-  const file = await getTelegramFileInfo(ctx.telegram, fileId);
-
-  const response = await fetch(
-    `https://api.telegram.org/file/bot` + `${BOT_TOKEN}/${file.file_path}`,
-  );
-
-  if (!response.ok) {
-    throw new Error(`Ошибка скачивания аудио: HTTP ${response.status}`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-
-  console.log(`✅ [AUDIO] Скачано: ${buffer.length} bytes`);
-
-  const extension = sanitizeAudioExtension(file.file_path, ".ogg");
-
-  const tempPath = path.join(
-    os.tmpdir(),
-    `yusem-audio-${Date.now()}${extension}`,
-  );
-
-  await fs.writeFile(tempPath, buffer);
-
-  try {
-    console.log("📝 [AUDIO] Загружаем в Gemini Files API...");
-
-    const uploaded = await genAIEmbeddings.files.upload({
-      file: tempPath,
-
-      config: {
-        mimeType,
-      },
-    });
-
-    if (!uploaded?.uri) {
-      throw new Error("Gemini Files API не вернул URI.");
-    }
-
-    console.log("✅ [AUDIO] Файл загружен в Gemini");
-
-    console.log("📝 [AUDIO] Начинаем транскрипцию...");
-
-    const interaction = await genAIEmbeddings.interactions.create({
-      model: AUDIO_TRANSCRIBE_MODEL,
-
-      input: [
-        {
-          type: "audio",
-
-          uri: uploaded.uri,
-
-          mime_type: uploaded.mimeType || mimeType,
-        },
-      ],
-
-      generation_config: {
-        transcription_config: {
-          language_codes: ["ru-RU"],
-
-          custom_vocabulary: [
-            "Юсэм",
-            "Юсем",
-            "Юмак",
-            "Юмах",
-            "Палыч",
-            "Андрей Скайп",
-            "Кухарка",
-            "Тюрретто",
-            "Тарахтелкин",
-            "Рябцево",
-            "Малое Рябцево",
-            "Великое Рябцево",
-            "Хонзо",
-            "Лексус UX",
-            "Lexus UX",
-          ],
-        },
-      },
-    });
-
-    const rawTranscript = (interaction?.output_text || "").trim();
-
-    if (!rawTranscript) {
-      throw new Error("Транскрипция вернула пустой текст.");
-    }
-
-    const transcript = normalizeAudioTranscript(rawTranscript);
-
-    console.log(`✅ [AUDIO] Исходная транскрипция: "${rawTranscript}"`);
-
-    console.log(`✅ [AUDIO] Нормализованная транскрипция: "${transcript}"`);
-
-    return transcript;
-  } finally {
     try {
-      await fs.unlink(tempPath);
+      await ctx.answerCbQuery("Ошибка.");
     } catch (_) {}
   }
-}
-
-async function sendAudioRadar(ctx, transcript) {
-  try {
-    const name = ctx.from?.first_name || ctx.from?.username || "Пользователь";
-
-    const username = ctx.from?.username ? `@${ctx.from.username}` : "";
-
-    const message =
-      `🎤 ${name} ${username}\n\n` +
-      `${transcript}\n\n` +
-      `📌 [group:${GROUP_ID}]\n` +
-      `🆔 [msg:${ctx.message.message_id}]`;
-
-    await ctx.telegram.sendMessage(MY_ID, message);
-
-    console.log(`📡 [RADAR AUDIO] msg=${ctx.message.message_id} → owner`);
-  } catch (error) {
-    console.error("❌ [RADAR AUDIO]", error.message);
-  }
-}
-
-async function handleAudioMessage(ctx, fileId, mimeType) {
-  const userName = ctx.from?.first_name || ctx.from?.username || "Пользователь";
-
-  console.log("");
-
-  console.log("========================================");
-
-  console.log(`🎤 [AUDIO] msg=${ctx.message?.message_id}`);
-
-  console.log(`🎤 [AUDIO] chat=${ctx.chat?.id}`);
-
-  console.log(`🎤 [AUDIO] from=${ctx.from?.id}`);
-
-  if (!fileId) {
-    console.error("❌ [AUDIO] file_id отсутствует");
-
-    return;
-  }
-
-  try {
-    const transcript = await transcribeAudio(ctx, fileId, mimeType);
-
-    if (!transcript) {
-      return;
-    }
-
-    console.log("✅ [AUDIO] Транскрипция готова");
-
-    if (isGroupMessage(ctx)) {
-      const mentioned = isAudioMentioned(transcript);
-
-      const replyToBot = isReplyToBot(ctx);
-
-      console.log(
-        `🎤 [AUDIO] Mentioned=${mentioned}, ReplyToBot=${replyToBot}`,
-      );
-
-      // Всегда отправляем транскрипцию владельцу
-      await sendAudioRadar(ctx, transcript);
-
-      if (!mentioned && !replyToBot) {
-        console.log(
-          "🎤 [AUDIO] В группе голосовое без обращения к Юмаку — не отвечаем",
-        );
-
-        return;
-      }
-
-      console.log("🧠 [AUDIO] Передаём распознанный текст в AI");
-
-      await handleAIText(ctx, transcript, userName);
-
-      return;
-    }
-
-    if (isOwnerPrivate(ctx)) {
-      await ctx.reply(`📝 Я услышал:\n\n${transcript}`);
-    }
-  } catch (error) {
-    console.error("❌ [AUDIO] Ошибка:");
-
-    console.error(error);
-
-    console.error("❌ [AUDIO] message:", error?.message);
-
-    if (isOwnerPrivate(ctx)) {
-      await ctx.reply("❌ Не удалось распознать голосовое.");
-    }
-  } finally {
-    console.log("========================================");
-  }
-}
-
-// ============================================================
-// VOICE
-// ============================================================
-
-bot.on("voice", async (ctx) => {
-  try {
-    await handleAudioMessage(ctx, ctx.message?.voice?.file_id, "audio/ogg");
-  } catch (error) {
-    console.error("❌ [VOICE]", error);
-  }
 });
 
 // ============================================================
-// AUDIO FILE
+// OWNER COMMANDS
 // ============================================================
 
-bot.on("audio", async (ctx) => {
-  try {
-    const audio = ctx.message?.audio;
-
-    if (!audio?.file_id) {
-      return;
-    }
-
-    await handleAudioMessage(
-      ctx,
-      audio.file_id,
-      audio.mime_type || "audio/mpeg",
-    );
-  } catch (error) {
-    console.error("❌ [AUDIO FILE]", error);
+async function handleOwnerCommand(ctx) {
+  if (!isOwnerPrivate(ctx)) {
+    return false;
   }
-});
 
-// ============================================================
-// PHOTO ROUTER
-// ============================================================
-
-bot.on("photo", async (ctx) => {
-  try {
-    if (isGroupMessage(ctx)) {
-      await handleGroupPhoto(ctx);
-
-      return;
-    }
-
-    if (isOwnerPrivate(ctx)) {
-      await handlePrivatePhoto(ctx);
-    }
-  } catch (error) {
-    console.error("❌ [PHOTO ROUTER]", error);
-  }
-});
-
-// ============================================================
-// TEXT ROUTER
-// ============================================================
-
-bot.on("text", async (ctx) => {
-  try {
-    const text = ctx.message?.text?.trim();
-
-    if (!text) {
-      return;
-    }
-
-    console.log("");
-    console.log("========================================");
-
-    console.log("📨 [UPDATE]");
-
-    console.log(`Chat ID: ${ctx.chat?.id}`);
-
-    console.log(`Type: ${ctx.chat?.type}`);
-
-    console.log(`From: ${ctx.from?.id}`);
-
-    console.log(`Text: ${text}`);
-
-    console.log("========================================");
-
-    // ------------------------------------------------------
-    // OWNER PRIVATE
-    // ------------------------------------------------------
-
-    if (isOwnerPrivate(ctx)) {
-      console.log("👤 [ROUTER] Сообщение владельца");
-
-      const handled = await handleOwnerCommand(ctx);
-
-      if (handled) {
-        return;
-      }
-
-      await sendOwnerMessageToGroup(ctx);
-
-      return;
-    }
-
-    // ------------------------------------------------------
-    // GROUP
-    // ------------------------------------------------------
-
-    if (isGroupMessage(ctx)) {
-      console.log("👥 [ROUTER] Сообщение группы");
-
-      await sendRadarMessage(ctx);
-
-      const shouldRunAI =
-        !isBotMessage(ctx) && (isMentioned(text) || isReplyToBot(ctx));
-
-      if (shouldRunAI) {
-        console.log("🚀 [AI] Запускаем AI отдельно");
-
-        void handleAI(ctx).catch((error) => {
-          console.error("❌ [AI]", error);
-        });
-      }
-
-      return;
-    }
-  } catch (error) {
-    console.error("❌ [ROUTER]", error);
-  }
-});
-
-// ============================================================
-// OWNER → GROUP
-// ============================================================
-
-async function sendOwnerMessageToGroup(ctx) {
   const text = ctx.message?.text?.trim();
 
   if (!text) {
-    return;
+    return false;
   }
 
-  const replyMessage = ctx.message?.reply_to_message;
+  if (!text.startsWith("/")) {
+    return false;
+  }
 
-  if (replyMessage?.text) {
-    const match = replyMessage.text.match(/\[msg:(\d+)\]/);
+  const command = text.split(/\s+/)[0].split("@")[0].toLowerCase();
 
-    if (match) {
-      const targetMessageId = Number(match[1]);
+  // ----------------------------------------------------------
+  // /start
+  // ----------------------------------------------------------
 
-      await ctx.telegram.sendMessage(GROUP_ID, text, {
-        reply_parameters: {
-          message_id: targetMessageId,
-        },
+  if (command === "/start") {
+    await ctx.reply(
+      "🏎️ Юсэм онлайн.\n\n" +
+        "/help\n" +
+        "/status\n" +
+        "/characters\n" +
+        "/clear\n\n" +
+        "/teach slug\n" +
+        "/done\n" +
+        "/cancel\n" +
+        "/identify\n" +
+        "/reindex",
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /help
+  // ----------------------------------------------------------
+
+  if (command === "/help") {
+    await ctx.reply(
+      "🛠 Управление:\n\n" +
+        "/status — состояние\n" +
+        "/characters — персонажи\n" +
+        "/clear — память\n\n" +
+        "/teach slug — обучение фото\n" +
+        "/done — завершить\n" +
+        "/cancel — отменить\n\n" +
+        "/identify — поиск + ручное подтверждение\n" +
+        "/reindex — embeddings старых фото",
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /clear
+  // ----------------------------------------------------------
+
+  if (command === "/clear") {
+    clearHistory(GROUP_ID);
+
+    await ctx.reply("🧠 Память очищена.");
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /status
+  // ----------------------------------------------------------
+
+  if (command === "/status") {
+    const models = GEMINI_MODELS.map(
+      (model, index) =>
+        `${index + 1}. ${model} ` + `${isModelOnCooldown(model) ? "⏸️" : "✅"}`,
+    ).join("\n");
+
+    await ctx.reply(
+      `🟢 Юсэм работает\n\n` +
+        `📦 Версия: ${GIT_COMMIT_SHORT}\n` +
+        `🌿 Ветка: ${GIT_BRANCH}\n` +
+        `🔗 Commit: ${GIT_COMMIT}\n\n` +
+        `🌐 Webhook:\n` +
+        `https://${PUBLIC_DOMAIN}${WEBHOOK_PATH}\n\n` +
+        `⏱ Uptime: ` +
+        `${Math.floor(process.uptime())} сек.\n` +
+        `🧠 Память: ` +
+        `${getHistory(GROUP_ID).length}\n` +
+        `📚 Teach: ` +
+        `${teachingSessions.size}\n` +
+        `🔍 Identify: ` +
+        `${identifySessions.size}\n\n` +
+        `🎤 Audio: ${AUDIO_TRANSCRIBE_MODEL}\n` +
+        `🎤 Language: ru-RU\n\n` +
+        `🤖 Gemini:\n` +
+        models,
+    );
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /characters
+  // ----------------------------------------------------------
+
+  if (command === "/characters") {
+    try {
+      const result = await pool.query(
+        `
+            SELECT
+                c.id,
+                c.name,
+                c.slug,
+
+                COUNT(
+                  DISTINCT p.id
+                )::int AS photo_count,
+
+                COUNT(
+                  DISTINCT l.id
+                )::int AS lore_count,
+
+                COUNT(
+                  DISTINCT CASE
+                    WHEN p.embedding IS NOT NULL
+                    THEN p.id
+                  END
+                )::int AS embedding_count
+
+            FROM characters c
+
+            LEFT JOIN character_photos p
+              ON p.character_id =
+                 c.id
+
+            LEFT JOIN character_lore l
+              ON l.character_id =
+                 c.id
+
+            GROUP BY
+                c.id,
+                c.name,
+                c.slug
+
+            ORDER BY
+                c.id
+          `,
+      );
+
+      const lines = result.rows.map(
+        (row) =>
+          `${row.name}\n` +
+          `  slug: ${row.slug}\n` +
+          `  📷 Фото: ${row.photo_count}\n` +
+          `  🧬 Embeddings: ${row.embedding_count}\n` +
+          `  📚 Лор: ${row.lore_count}`,
+      );
+
+      await ctx.reply("👥 Персонажи:\n\n" + lines.join("\n\n"));
+    } catch (error) {
+      console.error("❌ [CHARACTERS]", error.message);
+
+      await ctx.reply("❌ Не удалось получить персонажей.");
+    }
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /teach
+  // ----------------------------------------------------------
+
+  if (command === "/teach") {
+    const parts = text.split(/\s+/);
+
+    if (parts.length < 2) {
+      await ctx.reply("📷 Например: /teach essem");
+
+      return true;
+    }
+
+    const slug = parts[1].toLowerCase().trim();
+
+    try {
+      const result = await pool.query(
+        `
+            SELECT
+                id,
+                slug,
+                name
+
+            FROM characters
+
+            WHERE slug = $1
+
+            LIMIT 1
+          `,
+        [slug],
+      );
+
+      if (!result.rows.length) {
+        await ctx.reply(`❌ Персонаж "${slug}" не найден.`);
+
+        return true;
+      }
+
+      const character = result.rows[0];
+
+      clearIdentifySession(ctx.from.id);
+
+      clearTeachingSession(ctx.from.id);
+
+      setTeachingSession(ctx.from.id, {
+        characterId: character.id,
+
+        characterSlug: character.slug,
+
+        characterName: character.name,
+
+        photos: [],
       });
 
-      await ctx.reply("✅ Ответ отправлен с цитированием.");
+      await ctx.reply(
+        `📷 Начинаем обучение персонажа: ` +
+          `${character.name}\n\n` +
+          `Отправляй фотографии одну за одной.\n` +
+          `Когда закончишь — /done\n` +
+          `Отменить — /cancel`,
+      );
+    } catch (error) {
+      console.error("❌ [TEACH]", error);
 
-      return;
+      await ctx.reply("❌ Не удалось начать обучение.");
     }
+
+    return true;
   }
 
-  await ctx.telegram.sendMessage(GROUP_ID, text);
+  // ----------------------------------------------------------
+  // /identify
+  // ----------------------------------------------------------
 
-  await ctx.reply("✅ Отправлено в группу.");
+  if (command === "/identify") {
+    clearTeachingSession(ctx.from.id);
+
+    clearIdentifySession(ctx.from.id);
+
+    setIdentifySession(ctx.from.id, {
+      photo: null,
+    });
+
+    await ctx.reply(
+      "🔍 Пришли фотографию.\n\n" +
+        "Я сравню её с сохранёнными примерами.\n\n" +
+        "/cancel — отменить",
+    );
+
+    console.log("🔍 [IDENTIFY] Запущен");
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /reindex
+  // ----------------------------------------------------------
+
+  if (command === "/reindex") {
+    console.log("🧪 [REINDEX] Команда получена");
+
+    await ctx.telegram.sendMessage(
+      ctx.chat.id,
+      "🧬 Начинаю пересчёт embeddings старых фотографий...",
+    );
+
+    try {
+      const result = await pool.query(
+        `
+            SELECT
+                cp.id,
+                cp.telegram_file_id,
+                c.name
+
+            FROM character_photos cp
+
+            INNER JOIN characters c
+                ON c.id =
+                   cp.character_id
+
+            WHERE
+                cp.embedding IS NULL
+
+            ORDER BY
+                cp.id
+          `,
+      );
+
+      if (!result.rows.length) {
+        await ctx.reply("✅ Все фотографии уже имеют embeddings.");
+
+        return true;
+      }
+
+      let processed = 0;
+
+      for (const row of result.rows) {
+        try {
+          console.log(`🧬 [REINDEX] ${row.id}: ${row.name}`);
+
+          const buffer = await getTelegramFileBuffer(
+            ctx.telegram,
+            row.telegram_file_id,
+          );
+
+          const embedding = await generateImageEmbedding(buffer);
+
+          await saveEmbedding(row.id, embedding);
+
+          processed++;
+
+          console.log(`✅ [REINDEX] Фото ${row.id} готово`);
+        } catch (error) {
+          console.error(`❌ [REINDEX] Фото ${row.id}:`, error.message);
+        }
+      }
+
+      await ctx.reply(
+        `✅ Reindex завершён.\n\n` +
+          `Обработано: ${processed} из ${result.rows.length}`,
+      );
+    } catch (error) {
+      console.error("❌ [REINDEX]", error);
+
+      await ctx.reply(`❌ Reindex ошибка:\n${error.message}`);
+    }
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /cancel
+  // ----------------------------------------------------------
+
+  if (command === "/cancel") {
+    const teaching = getTeachingSession(ctx.from.id);
+
+    const identifying = getIdentifySession(ctx.from.id);
+
+    const audioCorrection = audioCorrectionSessions.get(ctx.from.id);
+
+    let handled = false;
+
+    if (teaching) {
+      clearTeachingSession(ctx.from.id);
+
+      await ctx.reply("❌ Обучение отменено.");
+
+      handled = true;
+    }
+
+    if (identifying) {
+      clearIdentifySession(ctx.from.id);
+
+      await ctx.reply("❌ Identify отменён.");
+
+      handled = true;
+    }
+
+    if (audioCorrection) {
+      audioCorrectionSessions.delete(ctx.from.id);
+
+      await ctx.reply("❌ Исправление аудио отменено.");
+
+      handled = true;
+    }
+
+    if (!handled) {
+      await ctx.reply("ℹ️ Активных сессий нет.");
+    }
+
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // /done
+  // ----------------------------------------------------------
+
+  if (command === "/done") {
+    const session = getTeachingSession(ctx.from.id);
+
+    if (!session) {
+      await ctx.reply("ℹ️ Нет активной teach-сессии.");
+
+      return true;
+    }
+
+    if (!session.photos.length) {
+      await ctx.reply("📷 Сначала отправь хотя бы одно фото.");
+
+      return true;
+    }
+
+    await ctx.reply(`⏳ Сохраняю ${session.photos.length} фото...`);
+
+    let savedCount = 0;
+
+    let embeddingCount = 0;
+
+    try {
+      for (let index = 0; index < session.photos.length; index++) {
+        const photo = session.photos[index];
+
+        const photoNumber = index + 1;
+
+        console.log(`📷 [TEACH] Фото ${photoNumber}`);
+
+        const buffer = await getTelegramFileBuffer(ctx.telegram, photo.fileId);
+
+        let embedding = null;
+
+        try {
+          embedding = await generateImageEmbedding(buffer);
+        } catch (error) {
+          console.error(`⚠️ [TEACH] Embedding #${photoNumber}:`, error.message);
+        }
+
+        await saveCharacterPhoto({
+          telegram: ctx.telegram,
+
+          fileId: photo.fileId,
+
+          characterId: session.characterId,
+
+          characterSlug: session.characterSlug,
+
+          photoNumber,
+
+          buffer,
+
+          embedding,
+        });
+
+        savedCount++;
+
+        if (embedding) {
+          embeddingCount++;
+        }
+      }
+
+      clearTeachingSession(ctx.from.id);
+
+      await ctx.reply(
+        `✅ Обучение завершено.\n\n` +
+          `Персонаж: ${session.characterName}\n` +
+          `📷 Фото: ${savedCount}\n` +
+          `🧬 Embeddings: ${embeddingCount}`,
+      );
+    } catch (error) {
+      console.error("❌ [DONE]", error);
+
+      await ctx.reply(`❌ Ошибка:\n${error.message}`);
+    }
+
+    return true;
+  }
+
+  return true;
 }
 
 // ============================================================
@@ -2438,19 +2718,6 @@ ${text}
 Если вопрос простой — отвечай просто.
 
 Если тема серьёзная — отвечай серьёзнее.
-
-============================================================
-ВАЖНО
-============================================================
-
-Постоянные правила характера,
-мира, лора, Lexus UX,
-Михаила Горячева, персонажей
-и остальных специальных тем
-находятся в system prompt.
-
-Не повторяй эти правила пользователю.
-Просто соблюдай их.
 `;
 
     console.log("📝 [AI] Отправляем запрос...");
@@ -2486,7 +2753,144 @@ async function handleAI(ctx) {
 }
 
 // ============================================================
-// GLOBAL ERROR HANDLER
+// TEXT ROUTER
+// ============================================================
+
+bot.on("text", async (ctx) => {
+  try {
+    const text = ctx.message?.text?.trim();
+
+    if (!text) {
+      return;
+    }
+
+    console.log("");
+    console.log("========================================");
+
+    console.log("📨 [UPDATE]");
+
+    console.log(`Chat ID: ${ctx.chat?.id}`);
+
+    console.log(`Type: ${ctx.chat?.type}`);
+
+    console.log(`From: ${ctx.from?.id}`);
+
+    console.log(`Text: ${text}`);
+
+    console.log("========================================");
+
+    // ------------------------------------------------------
+    // OWNER PRIVATE
+    // ------------------------------------------------------
+
+    if (isOwnerPrivate(ctx)) {
+      console.log("👤 [ROUTER] Сообщение владельца");
+
+      // Сначала проверяем,
+      // ждём ли мы исправление аудио.
+      const correctionSession = audioCorrectionSessions.get(ctx.from.id);
+
+      if (correctionSession) {
+        const correctText = text;
+
+        try {
+          await saveAudioCorrection(correctionSession.wrongText, correctText);
+
+          audioCorrectionSessions.delete(ctx.from.id);
+
+          await ctx.reply(
+            `✅ Исправление сохранено.\n\n` +
+              `Было:\n${correctionSession.wrongText}\n\n` +
+              `Стало:\n${correctText}\n\n` +
+              `Теперь буду учитывать это в следующих голосовых.`,
+          );
+        } catch (error) {
+          console.error("❌ [AUDIO CORRECTION SAVE]", error);
+
+          await ctx.reply(
+            `❌ Не удалось сохранить исправление.\n${error.message}`,
+          );
+        }
+
+        return;
+      }
+
+      const handled = await handleOwnerCommand(ctx);
+
+      if (handled) {
+        return;
+      }
+
+      await sendOwnerMessageToGroup(ctx);
+
+      return;
+    }
+
+    // ------------------------------------------------------
+    // GROUP
+    // ------------------------------------------------------
+
+    if (isGroupMessage(ctx)) {
+      console.log("👥 [ROUTER] Сообщение группы");
+
+      await sendRadarMessage(ctx);
+
+      const shouldRunAI =
+        !isBotMessage(ctx) && (isMentioned(text) || isReplyToBot(ctx));
+
+      if (shouldRunAI) {
+        console.log("🚀 [AI] Запускаем AI отдельно");
+
+        void handleAI(ctx).catch((error) => {
+          console.error("❌ [AI]", error);
+        });
+      }
+
+      return;
+    }
+  } catch (error) {
+    console.error("❌ [ROUTER]", error);
+  }
+});
+
+// ============================================================
+// OWNER → GROUP
+// ============================================================
+
+async function sendOwnerMessageToGroup(ctx) {
+  const text = ctx.message?.text?.trim();
+
+  if (!text) {
+    return;
+  }
+
+  const replyMessage = ctx.message?.reply_to_message;
+
+  if (replyMessage?.text) {
+    const match = replyMessage.text.match(/\[msg:(\d+)\]/);
+
+    if (match) {
+      const targetMessageId = Number(match[1]);
+
+      await ctx.telegram.sendMessage(GROUP_ID, text, {
+        reply_parameters: {
+          message_id: targetMessageId,
+        },
+      });
+
+      await ctx.reply("✅ Ответ отправлен с цитированием.");
+
+      return;
+    }
+  }
+
+  await ctx.telegram.sendMessage(GROUP_ID, text);
+
+  await ctx.reply("✅ Отправлено в группу.");
+}
+
+// ============================================================
+// ERROR HANDLER
 // ============================================================
 
 bot.catch((error, ctx) => {
@@ -2500,7 +2904,7 @@ bot.catch((error, ctx) => {
 });
 
 // ============================================================
-// EXPRESS
+// EXPRESS / HEALTH
 // ============================================================
 
 const app = express();
@@ -2523,6 +2927,12 @@ app.get("/health", (req, res) => {
     transport: "webhook",
 
     uptime: Math.floor(process.uptime()),
+
+    version: GIT_COMMIT_SHORT,
+
+    commit: GIT_COMMIT,
+
+    branch: GIT_BRANCH,
 
     webhook: `https://${PUBLIC_DOMAIN}${WEBHOOK_PATH}`,
 
@@ -2553,6 +2963,7 @@ let server = null;
 async function start() {
   try {
     console.log("");
+
     console.log("========================================");
 
     console.log("🏎️  ЮСЭМ / ЮМАК");
@@ -2568,6 +2979,7 @@ async function start() {
     console.log(`🌐 Port: ${PORT}`);
 
     console.log(`🌐 Webhook path: ${WEBHOOK_PATH}`);
+
     console.log(`📦 Git commit: ${GIT_COMMIT}`);
 
     console.log(`🌿 Git branch: ${GIT_BRANCH}`);
@@ -2611,6 +3023,10 @@ async function start() {
     if (WEBHOOK_SECRET) {
       webhookOptions.secretToken = WEBHOOK_SECRET;
     }
+
+    // ВАЖНО:
+    // bot.launch() здесь отсутствует.
+    // Только webhook.
 
     const webhookMiddleware = await bot.createWebhook(webhookOptions);
 
