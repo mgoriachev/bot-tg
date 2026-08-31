@@ -707,16 +707,11 @@ function getGroupVisualResult(candidates) {
 async function countPeopleInImage(buffer, mimeType = "image/jpeg") {
   console.log("👥 [PEOPLE] Определяем количество людей на фото...");
 
-  try {
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.7-flash",
-    });
-
-    const prompt = `
+  const prompt = `
 Посмотри на изображение.
 
-Нужно определить только примерное количество
-видимых людей/персон в кадре.
+Определи примерное количество людей,
+которые действительно видны в кадре.
 
 Ответь строго в JSON:
 
@@ -726,80 +721,130 @@ async function countPeopleInImage(buffer, mimeType = "image/jpeg") {
 }
 
 Правила:
+- считай только реально видимых людей;
+- человека можно считать, даже если он виден частично;
+- не считай людей на фотографиях, экранах или плакатах;
+- не считай манекены и статуи;
+- если людей много, укажи максимально разумное количество;
+- confidence: "high", "medium" или "low".
 
-- считай только явно видимых людей;
-- не считай фотографии на экранах;
-- не считай статуи или манекены;
-- если человека видно частично, но очевидно,
-  считай его;
-- если количество неясно, используй наиболее
-  разумную оценку;
-- confidence должен быть:
-  "high", "medium" или "low".
-
-Никаких дополнительных слов.
+Никаких комментариев вне JSON.
 `;
 
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          mimeType,
+  let lastError = null;
 
-          data: buffer.toString("base64"),
-        },
-      },
+  for (const modelName of GEMINI_MODELS) {
+    if (isModelOnCooldown(modelName)) {
+      console.log(`⏸️ [PEOPLE] ${modelName} пропущена — cooldown`);
 
-      prompt,
-    ]);
-
-    const text = result?.response?.text?.()?.trim();
-
-    if (!text) {
-      throw new Error("Gemini не вернул count.");
+      continue;
     }
 
-    let parsed;
+    console.log(`👥 [PEOPLE] Пробуем ${modelName}`);
 
     try {
-      parsed = JSON.parse(
-        text
-          .replace(/^```json\s*/i, "")
-          .replace(/```$/i, "")
-          .trim(),
-      );
-    } catch (_) {
-      const match = text.match(/\{[\s\S]*\}/);
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+      });
 
-      if (!match) {
-        throw new Error(`Не удалось разобрать ответ: ${text}`);
+      const result = await withTimeout(
+        model.generateContent([
+          {
+            inlineData: {
+              mimeType,
+              data: buffer.toString("base64"),
+            },
+          },
+
+          prompt,
+        ]),
+
+        MODEL_TIMEOUT_MS,
+
+        `Timeout ${MODEL_TIMEOUT_MS}ms: ${modelName}`,
+      );
+
+      const text = result?.response?.text?.()?.trim();
+
+      if (!text) {
+        throw new Error("Gemini не вернул ответ.");
       }
 
-      parsed = JSON.parse(match[0]);
+      let parsed;
+
+      try {
+        parsed = JSON.parse(
+          text
+            .replace(/^```json\s*/i, "")
+            .replace(/```$/i, "")
+            .trim(),
+        );
+      } catch (_) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+
+        if (!jsonMatch) {
+          throw new Error(`Не удалось разобрать JSON: ${text}`);
+        }
+
+        parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const count = Math.max(0, Number(parsed.people_count) || 0);
+
+      const confidence = ["high", "medium", "low"].includes(parsed.confidence)
+        ? parsed.confidence
+        : "low";
+
+      console.log(`✅ [PEOPLE] Ответ через ${modelName}`);
+
+      console.log(
+        `✅ [PEOPLE] Людей обнаружено: ${count}, confidence=${confidence}`,
+      );
+
+      return {
+        count,
+        confidence,
+        model: modelName,
+      };
+    } catch (error) {
+      lastError = error;
+
+      console.error(`❌ [PEOPLE] ${modelName}:`, error.message);
+
+      if (is429Error(error)) {
+        putModelOnCooldown(modelName);
+
+        console.log(`⏭️ [PEOPLE] ${modelName} получила 429 — следующая модель`);
+
+        continue;
+      }
+
+      if (isTemporaryGeminiError(error)) {
+        putModelOnCooldown(modelName);
+
+        continue;
+      }
+
+      /*
+       * Для ошибки формата/JSON тоже
+       * пробуем следующую модель.
+       */
+
+      continue;
     }
-
-    const count = Math.max(0, Number(parsed.people_count) || 0);
-
-    const confidence = ["high", "medium", "low"].includes(parsed.confidence)
-      ? parsed.confidence
-      : "low";
-
-    console.log(
-      `✅ [PEOPLE] Людей обнаружено: ${count}, confidence=${confidence}`,
-    );
-
-    return {
-      count,
-      confidence,
-    };
-  } catch (error) {
-    console.error("❌ [PEOPLE] Ошибка:", error.message);
-
-    return {
-      count: null,
-
-      confidence: "low",
-    };
   }
+
+  console.error("❌ [PEOPLE] Все Gemini-модели недоступны");
+
+  if (lastError) {
+    console.error("❌ [PEOPLE] Последняя ошибка:", lastError.message);
+  }
+
+  return {
+    count: null,
+    confidence: "low",
+    model: null,
+  };
 }
 
 // ============================================================
