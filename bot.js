@@ -172,21 +172,62 @@ async function getCharacterLore(searchText) {
   if (!searchText) {
     return [];
   }
-  /* * Убираем обращение к самому Юсэму в начале сообщения. * * Например: * * "Юмак, кто такой Палыч?" * ↓ * "кто такой Палыч?" * * "Юсэм расскажи про Кухарку" * ↓ * "расскажи про Кухарку" * * Это не даёт триггеру "Юмак/Юсэм" * автоматически подтягивать весь лор самого Юсэма. */ const loreSearchText =
-    searchText.replace(/^\s*(?:юсэм|юмак)\b[\s,:;.!?—-]*/iu, "").trim();
-  /* * Если после удаления обращения ничего не осталось, * лор искать не нужно. */ if (
-    !loreSearchText
-  ) {
+
+  /*
+   * Убираем обращение к Юсэму / Юмаку в начале сообщения.
+   *
+   * ВАЖНО:
+   * здесь специально НЕ используем \b,
+   * потому что с кириллицей он работает ненадёжно.
+   */
+
+  const loreSearchText = searchText
+    .replace(/^\s*(?:юсэм|юмак)\s*[,.:;!?—-]?\s*/iu, "")
+    .trim();
+
+  console.log(`🔎 [LORE] Поисковый текст: "${loreSearchText}"`);
+
+  if (!loreSearchText) {
+    console.log("🔎 [LORE] После удаления обращения искать нечего");
+
     return [];
   }
+
   try {
     const result = await pool.query(
-      ` SELECT DISTINCT c.id, c.slug, c.name, c.description, l.fact, l.importance, l.id AS lore_id FROM characters c INNER JOIN character_aliases a ON a.character_id = c.id LEFT JOIN character_lore l ON l.character_id = c.id WHERE lower($1) LIKE '%' || lower(a.alias) || '%' ORDER BY l.importance DESC NULLS LAST, c.id ASC, l.id ASC `,
+      `
+            SELECT DISTINCT
+                c.id,
+                c.slug,
+                c.name,
+                c.description,
+                l.fact,
+                l.importance,
+                l.id AS lore_id
+
+            FROM characters c
+
+            INNER JOIN character_aliases a
+                ON a.character_id = c.id
+
+            LEFT JOIN character_lore l
+                ON l.character_id = c.id
+
+            WHERE
+                lower($1) LIKE '%' || lower(a.alias) || '%'
+
+            ORDER BY
+                l.importance DESC NULLS LAST,
+                c.id ASC,
+                l.id ASC
+            `,
       [loreSearchText],
     );
+
     return result.rows;
   } catch (error) {
     console.error("❌ [LORE] Ошибка чтения:", error.message);
+
     return [];
   }
 }
