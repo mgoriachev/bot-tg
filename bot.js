@@ -39,6 +39,20 @@ if (!SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+supabase.storage.listBuckets().then(({ data, error }) => {
+  if (error) {
+    console.error("❌ [STORAGE] Ошибка:", error.message);
+    return;
+  }
+
+  console.log("✅ [STORAGE] Подключён");
+
+  console.log(
+    "📦 [STORAGE] Buckets:",
+    data.map((bucket) => bucket.name),
+  );
+});
+
 // Твой Telegram ID
 const MY_ID = 141824902;
 
