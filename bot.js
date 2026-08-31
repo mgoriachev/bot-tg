@@ -510,42 +510,33 @@ async function saveEmbedding(photoId, embedding) {
 }
 
 async function matchCharacterPhotos(embedding, matchCount = 10) {
-  const result = await pool.query(
-    `
-      SELECT
-          cp.id,
-          cp.character_id,
-          cp.storage_path,
-          cp.photo_number,
-
-          c.name AS character_name,
-          c.slug AS character_slug,
-
-          1 - (
-              cp.embedding
-              <=>
-              $1::extensions.vector
-          ) AS similarity
-
-      FROM character_photos cp
-
-      INNER JOIN characters c
-          ON c.id = cp.character_id
-
-      WHERE cp.embedding IS NOT NULL
-
-      ORDER BY
-          cp.embedding
-          <=>
-          $1::extensions.vector
-
-      LIMIT $2
-      `,
-
-    [vectorToPg(embedding), matchCount],
-  );
-
-  return result.rows;
+  console.log(`🔎 [VECTOR] Начинаем поиск ${matchCount} ближайших фото...`);
+  const vector = vectorToPg(embedding);
+  console.log(`🔎 [VECTOR] Вектор подготовлен, длина=${embedding.length}`);
+  try {
+    const result = await pool.query(
+      ` SELECT cp.id, cp.character_id, cp.storage_path, cp.photo_number, c.name AS character_name, c.slug AS character_slug, 1 - ( cp.embedding <=> $1::extensions.vector ) AS similarity FROM character_photos cp INNER JOIN characters c ON c.id = cp.character_id WHERE cp.embedding IS NOT NULL ORDER BY cp.embedding <=> $1::extensions.vector LIMIT $2 `,
+      [vector, matchCount],
+    );
+    console.log(
+      `✅ [VECTOR] SQL завершён. Найдено строк: ${result.rows.length}`,
+    );
+    if (result.rows.length) {
+      console.log("🔎 [VECTOR] Результаты:");
+      for (const row of result.rows) {
+        console.log(
+          ` → ${row.character_name} | ` +
+            `photo=${row.photo_number} | ` +
+            `similarity=${row.similarity}`,
+        );
+      }
+    }
+    return result.rows;
+  } catch (error) {
+    console.error("❌ [VECTOR] Ошибка SQL поиска:");
+    console.error(error);
+    throw error;
+  }
 }
 
 function groupSimilarityCandidates(rows) {
@@ -1526,7 +1517,12 @@ async function handleGroupPhoto(ctx) {
     return;
   }
 
+  console.log("");
+  console.log("========================================");
+
   console.log(`🔍 [GROUP PHOTO] msg=${ctx.message.message_id}`);
+
+  console.log("📥 [GROUP PHOTO] Скачиваем фото...");
 
   try {
     const buffer = await getTelegramFileBuffer(
@@ -1534,39 +1530,105 @@ async function handleGroupPhoto(ctx) {
       largestPhoto.file_id,
     );
 
+    console.log(`✅ [GROUP PHOTO] Фото скачано: ${buffer.length} bytes`);
+
+    // --------------------------------------------------------
+    // EMBEDDING
+    // --------------------------------------------------------
+
     const embedding = await generateImageEmbedding(buffer);
+
+    console.log("✅ [GROUP PHOTO] Embedding готов");
+
+    // --------------------------------------------------------
+    // VECTOR SEARCH
+    // --------------------------------------------------------
+
+    console.log("🔎 [GROUP PHOTO] Ищем похожие фотографии...");
 
     const matches = await matchCharacterPhotos(embedding, 10);
 
+    console.log(`✅ [GROUP PHOTO] Поиск завершён. Matches=${matches.length}`);
+
+    // --------------------------------------------------------
+    // GROUP CANDIDATES
+    // --------------------------------------------------------
+
     const candidates = groupSimilarityCandidates(matches);
+
+    console.log(`🔎 [GROUP PHOTO] Кандидатов персонажей: ${candidates.length}`);
+
+    if (candidates.length) {
+      for (const candidate of candidates) {
+        console.log(
+          `   → ${candidate.characterName}: ` +
+            `best=${candidate.bestSimilarity} ` +
+            `photos=${candidate.photos}`,
+        );
+      }
+    }
+
+    // --------------------------------------------------------
+    // RESULT
+    // --------------------------------------------------------
 
     const visualResult = getGroupVisualResult(candidates);
 
+    console.log(`🔎 [GROUP PHOTO] Result level=${visualResult.level}`);
+
+    if (visualResult.candidate) {
+      console.log(
+        `🔎 [GROUP PHOTO] Best=${visualResult.candidate.characterName}`,
+      );
+
+      console.log(
+        `🔎 [GROUP PHOTO] Best similarity=${visualResult.candidate.bestSimilarity}`,
+      );
+    }
+
     if (visualResult.level === "unknown") {
+      console.log("ℹ️ [GROUP PHOTO] Уверенного совпадения нет");
+
       await ctx.reply(
-        "🤷 Не могу уверенно сопоставить " +
-          "это фото с сохранёнными примерами.",
+        "🤷 Не могу уверенно сопоставить это фото с сохранёнными примерами.",
       );
 
       return;
     }
 
     if (visualResult.level === "medium") {
+      console.log(
+        `ℹ️ [GROUP PHOTO] Средняя уверенность: ${visualResult.candidate.characterName}`,
+      );
+
       await ctx.reply(
-        `🤔 Возможно, фото похоже на ` +
-          `сохранённые примеры ${visualResult.candidate.characterName}.`,
+        `🤔 Возможно, фото похоже на сохранённые примеры ${visualResult.candidate.characterName}.`,
       );
 
       return;
     }
 
-    await ctx.reply(
-      `✅ Фото очень похоже на ` +
-        `сохранённые примеры ` +
-        `${visualResult.candidate.characterName}.`,
-    );
+    if (visualResult.level === "high") {
+      console.log(
+        `✅ [GROUP PHOTO] Высокая уверенность: ${visualResult.candidate.characterName}`,
+      );
+
+      await ctx.reply(
+        `✅ Фото очень похоже на сохранённые примеры ${visualResult.candidate.characterName}.`,
+      );
+
+      return;
+    }
   } catch (error) {
-    console.error("❌ [GROUP PHOTO]", error.message);
+    console.error("❌ [GROUP PHOTO] Полная ошибка:");
+
+    console.error(error);
+
+    console.error("❌ [GROUP PHOTO] message:", error?.message);
+
+    console.error("❌ [GROUP PHOTO] stack:", error?.stack);
+  } finally {
+    console.log("========================================");
   }
 }
 
