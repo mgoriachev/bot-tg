@@ -1503,17 +1503,13 @@ bot.on("photo", async (ctx) => {
         const candidate = visualResult.candidate;
 
         if (visualResult.level === "medium") {
-          await ctx.reply(
-            `🤔 Возможно, фото похоже на сохранённые примеры ${candidate.characterName}.`,
-          );
+          await ctx.reply(`🤔 Возможно, на фото ${candidate.characterName}.`);
 
           return;
         }
 
         if (visualResult.level === "high") {
-          await ctx.reply(
-            `✅ Фото очень похоже на сохранённые примеры ${candidate.characterName}.`,
-          );
+          await ctx.reply(`✅ Думаю тут ${candidate.characterName}.`);
 
           return;
         }
