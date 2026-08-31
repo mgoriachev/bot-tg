@@ -10,11 +10,12 @@ const { SYSTEM_PROMPT } = require("./prompt");
 // CONFIG
 // ============================================================
 
-const REQUIRED_ENV = ["BOT_TOKEN", "GEMINI_API_KEY"];
+const REQUIRED_ENV = ["BOT_TOKEN", "GEMINI_API_KEY", "DATABASE_URL"];
 
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     console.error(`❌ Не задана переменная окружения: ${key}`);
+
     process.exit(1);
   }
 }
@@ -23,28 +24,10 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-if (!DATABASE_URL) {
-  console.error("❌ Не задана переменная DATABASE_URL");
-  process.exit(1);
-}
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
-});
-
-pool
-  .query("SELECT NOW()")
-  .then(() => {
-    console.log("✅ PostgreSQL / Supabase подключён");
-  })
-  .catch((error) => {
-    console.error("❌ Ошибка подключения к PostgreSQL:", error.message);
-  });
-
+// Твой Telegram ID
 const MY_ID = 141824902;
+
+// ID группы
 const GROUP_ID = -5278268745;
 
 // Render сам передаёт PORT
@@ -53,6 +36,12 @@ const PORT = Number(process.env.PORT) || 3000;
 // ============================================================
 // GEMINI MODELS
 // ============================================================
+
+/*
+ * Можно переопределить на Render:
+ *
+ * GEMINI_MODELS=gemini-3.7-flash,gemini-3.6-flash,...
+ */
 
 const GEMINI_MODELS = (
   process.env.GEMINI_MODELS ||
@@ -71,6 +60,38 @@ const GEMINI_MODELS = (
   .filter(Boolean);
 
 // ============================================================
+// DATABASE
+// ============================================================
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+
+  ssl: {
+    rejectUnauthorized: false,
+  },
+
+  // Для небольшого бота больше не нужно.
+  max: 5,
+
+  idleTimeoutMillis: 30000,
+
+  connectionTimeoutMillis: 10000,
+});
+
+pool
+  .query("SELECT NOW()")
+  .then(() => {
+    console.log("✅ PostgreSQL / Supabase подключён");
+  })
+  .catch((error) => {
+    console.error("❌ Ошибка подключения к PostgreSQL:", error.message);
+  });
+
+pool.on("error", (error) => {
+  console.error("❌ PostgreSQL pool error:", error.message);
+});
+
+// ============================================================
 // MEMORY
 // ============================================================
 
@@ -78,82 +99,6 @@ const MAX_HISTORY = 20;
 const MAX_CONTEXT_CHARS = 12000;
 
 const chatHistory = new Map();
-
-// ============================================================
-// AI SETTINGS
-// ============================================================
-
-// Сколько раз повторять модель
-const RETRIES_PER_MODEL = 1;
-
-// Пауза между попытками
-const RETRY_DELAY_MS = 1000;
-
-// Сколько максимум ждать ОДНУ модель
-const MODEL_TIMEOUT_MS = 20000;
-
-// На сколько секунд отключать модель после 429/503/timeout
-const MODEL_COOLDOWN_MS = 60 * 1000;
-
-const modelCooldowns = new Map();
-
-// ============================================================
-// TELEGRAM
-// ============================================================
-
-/*
- * Важно:
- *
- * Увеличиваем handlerTimeout с дефолтных 90 секунд,
- * но ниже AI всё равно запускается отдельно.
- *
- * Это дополнительная страховка.
- */
-const bot = new Telegraf(BOT_TOKEN, {
-  handlerTimeout: 120000,
-});
-
-// ============================================================
-// GEMINI
-// ============================================================
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-const aiModels = GEMINI_MODELS.map((modelName) => ({
-  name: modelName,
-
-  instance: genAI.getGenerativeModel({
-    model: modelName,
-    systemInstruction: SYSTEM_PROMPT,
-  }),
-}));
-
-// ============================================================
-// EXPRESS / RENDER
-// ============================================================
-
-const app = express();
-
-app.get("/", (req, res) => {
-  res.status(200).send("🏎️ Юсэм онлайн");
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    bot: "online",
-    uptime: Math.floor(process.uptime()),
-    models: GEMINI_MODELS,
-  });
-});
-
-const server = app.listen(PORT, () => {
-  console.log(`🌐 HTTP сервер запущен на порту ${PORT}`);
-});
-
-// ============================================================
-// MEMORY FUNCTIONS
-// ============================================================
 
 function getHistory(chatId) {
   if (!chatHistory.has(chatId)) {
@@ -204,7 +149,175 @@ function buildHistoryContext(chatId) {
 }
 
 // ============================================================
-// HELPERS
+// CHARACTER LORE
+// ============================================================
+
+/*
+ * Ищем персонажей по их алиасам.
+ *
+ * Например:
+ *
+ * "Скайпом" → Андрей Скайп
+ * "Палыча" → Палыч
+ * "Кухаркой" → Кухарка
+ *
+ * Затем получаем описание и факты из character_lore.
+ */
+
+async function getCharacterLore(searchText) {
+  if (!searchText) {
+    return [];
+  }
+
+  try {
+    const result = await pool.query(
+      `
+            SELECT DISTINCT
+                c.id,
+                c.slug,
+                c.name,
+                c.description,
+                l.fact,
+                l.importance,
+                l.id AS lore_id
+
+            FROM characters c
+
+            INNER JOIN character_aliases a
+                ON a.character_id = c.id
+
+            LEFT JOIN character_lore l
+                ON l.character_id = c.id
+
+            WHERE
+                lower($1) LIKE '%' || lower(a.alias) || '%'
+
+            ORDER BY
+                l.importance DESC NULLS LAST,
+                c.id ASC,
+                l.id ASC
+            `,
+      [searchText],
+    );
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ [LORE] Ошибка чтения:", error.message);
+
+    return [];
+  }
+}
+
+function buildCharacterLoreContext(rows) {
+  if (!rows.length) {
+    return "(релевантный лор персонажей не найден)";
+  }
+
+  const grouped = new Map();
+
+  for (const row of rows) {
+    if (!grouped.has(row.id)) {
+      grouped.set(row.id, {
+        name: row.name,
+        description: row.description || "",
+        facts: [],
+      });
+    }
+
+    if (row.fact) {
+      grouped.get(row.id).facts.push(row.fact);
+    }
+  }
+
+  return Array.from(grouped.values())
+    .map((character) => {
+      const description = character.description
+        ? `Описание: ${character.description}`
+        : "";
+
+      const facts = character.facts.length
+        ? character.facts.map((fact) => `- ${fact}`).join("\n")
+        : "- Дополнительных фактов нет.";
+
+      return (
+        `Персонаж: ${character.name}\n` +
+        `${description}\n` +
+        `Факты:\n${facts}`
+      );
+    })
+    .join("\n\n");
+}
+
+// ============================================================
+// AI SETTINGS
+// ============================================================
+
+const RETRY_DELAY_MS = 1000;
+
+// Максимальное ожидание одной модели
+const MODEL_TIMEOUT_MS = 20000;
+
+// Сколько секунд модель пропускается после 429/503/timeout
+const MODEL_COOLDOWN_MS = 60 * 1000;
+
+const modelCooldowns = new Map();
+
+// ============================================================
+// TELEGRAM
+// ============================================================
+
+const bot = new Telegraf(BOT_TOKEN, {
+  /*
+   * Это дополнительная страховка.
+   *
+   * AI всё равно запускается отдельно,
+   * поэтому Telegram не должен ждать Gemini.
+   */
+  handlerTimeout: 120000,
+});
+
+// ============================================================
+// GEMINI
+// ============================================================
+
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+const aiModels = GEMINI_MODELS.map((modelName) => ({
+  name: modelName,
+
+  instance: genAI.getGenerativeModel({
+    model: modelName,
+
+    systemInstruction: SYSTEM_PROMPT,
+  }),
+}));
+
+// ============================================================
+// EXPRESS / RENDER
+// ============================================================
+
+const app = express();
+
+app.get("/", (req, res) => {
+  res.status(200).send("🏎️ Юсэм онлайн");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    bot: "online",
+    uptime: Math.floor(process.uptime()),
+    models: GEMINI_MODELS,
+    history: getHistory(GROUP_ID).length,
+  });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`🌐 HTTP сервер запущен на порту ${PORT}`);
+});
+
+// ============================================================
+// BASIC HELPERS
 // ============================================================
 
 function isGroupMessage(ctx) {
@@ -220,19 +333,17 @@ function isBotMessage(ctx) {
 }
 
 /*
- * Простейшая и надёжная проверка.
+ * Простая и надёжная проверка обращения к Юсэму.
  *
- * Распознаёт:
+ * Поддерживает:
+ *
  * Юсэм
- * юсэм
- * ЮСЭМ
  * Юмак
+ * юсэм
  * юмак
- *
- * и фразы:
- * "Юмак, расскажи..."
- * "слушай, Юсэм..."
+ * Юмак, расскажи...
  */
+
 function isMentioned(text = "") {
   if (!text) {
     return false;
@@ -280,6 +391,7 @@ function isModelOnCooldown(modelName) {
 
   if (Date.now() >= cooldownUntil) {
     modelCooldowns.delete(modelName);
+
     return false;
   }
 
@@ -291,7 +403,7 @@ function putModelOnCooldown(modelName) {
 }
 
 // ============================================================
-// TIMEOUT WRAPPER
+// TIMEOUT
 // ============================================================
 
 function withTimeout(promise, timeoutMs, errorMessage) {
@@ -307,6 +419,7 @@ function withTimeout(promise, timeoutMs, errorMessage) {
     promise.finally(() => {
       clearTimeout(timeoutId);
     }),
+
     timeoutPromise,
   ]);
 }
@@ -315,8 +428,16 @@ function withTimeout(promise, timeoutMs, errorMessage) {
 // GEMINI ERROR
 // ============================================================
 
+function getErrorMessage(error) {
+  return String(error?.message || "");
+}
+
+function is429Error(error) {
+  return getErrorMessage(error).includes("429");
+}
+
 function isTemporaryGeminiError(error) {
-  const message = String(error?.message || "").toLowerCase();
+  const message = getErrorMessage(error).toLowerCase();
 
   const patterns = [
     "429",
@@ -349,7 +470,7 @@ async function generateAIResponse(prompt) {
 
   for (const model of aiModels) {
     // ----------------------------------------------------
-    // Проверяем cooldown
+    // COOLDOWN
     // ----------------------------------------------------
 
     if (isModelOnCooldown(model.name)) {
@@ -360,12 +481,18 @@ async function generateAIResponse(prompt) {
 
     console.log(`🤖 [GEMINI] Пробуем ${model.name}`);
 
+    // ----------------------------------------------------
+    // ПЕРВАЯ ПОПЫТКА
+    // ----------------------------------------------------
+
     try {
       console.log(`🔄 [GEMINI] ${model.name} попытка 1`);
 
       const result = await withTimeout(
         model.instance.generateContent(prompt),
+
         MODEL_TIMEOUT_MS,
+
         `Timeout ${MODEL_TIMEOUT_MS}ms: ${model.name}`,
       );
 
@@ -386,41 +513,45 @@ async function generateAIResponse(prompt) {
 
       console.error(`❌ [GEMINI] ${model.name}:`, error.message);
 
-      const temporary = isTemporaryGeminiError(error);
+      // =================================================
+      // 429
+      // =================================================
 
-      // ------------------------------------------------
-      // 429 — квота исчерпана.
-      // НЕ повторяем запрос этой же модели.
-      // Сразу идём к следующей.
-      // ------------------------------------------------
-
-      if (temporary && String(error.message).includes("429")) {
+      if (is429Error(error)) {
         putModelOnCooldown(model.name);
 
         console.log(
           `⏭️ [GEMINI] ${model.name} ` +
-            `получила 429 — сразу следующая модель`,
+            `получила 429 — ` +
+            `БЕЗ повторной попытки`,
         );
+
+        console.log(`➡️ [GEMINI] Следующая модель`);
 
         continue;
       }
 
-      // ------------------------------------------------
-      // 503 / timeout и другие временные ошибки
-      // можно повторить один раз.
-      // ------------------------------------------------
+      // =================================================
+      // ВРЕМЕННАЯ ОШИБКА
+      // =================================================
 
-      if (temporary) {
-        console.log(`⏳ [GEMINI] Временная ошибка у ` + `${model.name}`);
+      if (isTemporaryGeminiError(error)) {
+        console.log(`⏳ [GEMINI] Временная ошибка ` + `у ${model.name}`);
 
         await sleep(RETRY_DELAY_MS);
 
+        // ------------------------------------------------
+        // ВТОРАЯ ПОПЫТКА
+        // ------------------------------------------------
+
         try {
-          console.log(`🔄 [GEMINI] ${model.name} попытка 2`);
+          console.log(`🔄 [GEMINI] ${model.name} ` + `попытка 2`);
 
           const retryResult = await withTimeout(
             model.instance.generateContent(prompt),
+
             MODEL_TIMEOUT_MS,
+
             `Timeout ${MODEL_TIMEOUT_MS}ms: ${model.name}`,
           );
 
@@ -448,15 +579,17 @@ async function generateAIResponse(prompt) {
             putModelOnCooldown(model.name);
           }
 
+          console.log(`➡️ [GEMINI] Следующая модель`);
+
           continue;
         }
       }
 
-      // ------------------------------------------------
-      // Постоянная ошибка — сразу следующая модель
-      // ------------------------------------------------
+      // =================================================
+      // ПОСТОЯННАЯ ОШИБКА
+      // =================================================
 
-      console.log(`➡️ [GEMINI] Постоянная ошибка, ` + `переходим дальше`);
+      console.log(`➡️ [GEMINI] Ошибка постоянная, ` + `следующая модель`);
     }
   }
 
@@ -511,11 +644,19 @@ async function handleOwnerCommand(ctx) {
 
   const text = ctx.message?.text?.trim();
 
-  if (!text?.startsWith("/")) {
+  if (!text) {
+    return false;
+  }
+
+  if (!text.startsWith("/")) {
     return false;
   }
 
   const command = text.split(/\s+/)[0].split("@")[0].toLowerCase();
+
+  // --------------------------------------------------------
+  // START
+  // --------------------------------------------------------
 
   if (command === "/start") {
     await ctx.reply(
@@ -528,6 +669,10 @@ async function handleOwnerCommand(ctx) {
     return true;
   }
 
+  // --------------------------------------------------------
+  // HELP
+  // --------------------------------------------------------
+
   if (command === "/help") {
     await ctx.reply(
       "🛠 Управление Юсэмом:\n\n" +
@@ -535,11 +680,16 @@ async function handleOwnerCommand(ctx) {
         "/status — состояние бота\n\n" +
         "Ответь на сообщение радара — " +
         "ответ уйдёт в группу с цитированием.\n\n" +
-        "Просто напиши мне — текст уйдёт в группу.",
+        "Просто напиши мне текст — " +
+        "он уйдёт в группу.",
     );
 
     return true;
   }
+
+  // --------------------------------------------------------
+  // CLEAR
+  // --------------------------------------------------------
 
   if (command === "/clear") {
     clearHistory(GROUP_ID);
@@ -551,29 +701,37 @@ async function handleOwnerCommand(ctx) {
     return true;
   }
 
+  // --------------------------------------------------------
+  // STATUS
+  // --------------------------------------------------------
+
   if (command === "/status") {
     const historyLength = getHistory(GROUP_ID).length;
 
-    let message =
-      `🟢 Юсэм работает\n\n` +
-      `⏱ Uptime: ` +
-      `${Math.floor(process.uptime())} сек.\n` +
-      `🧠 Память: ` +
-      `${historyLength} сообщений\n\n` +
-      `🤖 Gemini модели:\n`;
+    const modelStatus = GEMINI_MODELS.map((model, index) => {
+      const cooldown = isModelOnCooldown(model);
 
-    message += GEMINI_MODELS.map((model, index) => {
-      const status = isModelOnCooldown(model) ? " ⏸️ cooldown" : " ✅";
-
-      return `${index + 1}. ` + `${model}${status}`;
+      return `${index + 1}. ` + `${model} ` + (cooldown ? "⏸️" : "✅");
     }).join("\n");
 
-    await ctx.reply(message);
+    await ctx.reply(
+      `🟢 Юсэм работает\n\n` +
+        `⏱ Uptime: ` +
+        `${Math.floor(process.uptime())} сек.\n` +
+        `🧠 Память: ` +
+        `${historyLength} сообщений\n\n` +
+        `🤖 Gemini:\n` +
+        modelStatus,
+    );
 
     return true;
   }
 
-  // Неизвестную команду не отправляем в группу
+  /*
+   * Неизвестные команды не отправляем
+   * в группу.
+   */
+
   return true;
 }
 
@@ -588,11 +746,11 @@ async function sendOwnerMessageToGroup(ctx) {
     return;
   }
 
-  const replyMessage = ctx.message.reply_to_message;
+  const replyMessage = ctx.message?.reply_to_message;
 
-  /*
-   * Ответ на сообщение радара.
-   */
+  // --------------------------------------------------------
+  // Ответ через радар
+  // --------------------------------------------------------
 
   if (replyMessage?.text) {
     const match = replyMessage.text.match(/\[msg:(\d+)\]/);
@@ -624,9 +782,9 @@ async function sendOwnerMessageToGroup(ctx) {
     }
   }
 
-  /*
-   * Простое сообщение.
-   */
+  // --------------------------------------------------------
+  // Обычное сообщение
+  // --------------------------------------------------------
 
   try {
     await ctx.telegram.sendMessage(GROUP_ID, text);
@@ -635,18 +793,22 @@ async function sendOwnerMessageToGroup(ctx) {
 
     console.log("📤 [OWNER] Сообщение отправлено");
   } catch (error) {
-    console.error("❌ [OWNER] Ошибка:", error.message);
+    console.error("❌ [OWNER] Ошибка отправки:", error.message);
 
     await ctx.reply("❌ Не удалось отправить сообщение.");
   }
 }
 
 // ============================================================
-// AI HANDLER
+// AI
 // ============================================================
 
 async function handleAI(ctx) {
   try {
+    // ----------------------------------------------------
+    // Проверки
+    // ----------------------------------------------------
+
     if (!isGroupMessage(ctx)) {
       return;
     }
@@ -660,6 +822,10 @@ async function handleAI(ctx) {
     if (!text) {
       return;
     }
+
+    // ----------------------------------------------------
+    // Проверяем обращение
+    // ----------------------------------------------------
 
     const mentioned = isMentioned(text);
 
@@ -696,7 +862,7 @@ async function handleAI(ctx) {
     console.log(`🧠 [AI] Запрос от ${userName}`);
 
     // ----------------------------------------------------
-    // Добавляем сообщение в память
+    // Память
     // ----------------------------------------------------
 
     addToHistory(GROUP_ID, "user", userName, text);
@@ -710,10 +876,28 @@ async function handleAI(ctx) {
     await ctx.sendChatAction("typing");
 
     // ----------------------------------------------------
-    // История
+    // История разговора
     // ----------------------------------------------------
 
     const historyContext = buildHistoryContext(GROUP_ID);
+
+    // ----------------------------------------------------
+    // Лор персонажей
+    // ----------------------------------------------------
+
+    console.log("📚 [LORE] Ищем персонажей в базе...");
+
+    const loreRows = await getCharacterLore(text);
+
+    const characterLoreContext = buildCharacterLoreContext(loreRows);
+
+    console.log(`📚 [LORE] Найдено строк: ` + `${loreRows.length}`);
+
+    if (loreRows.length) {
+      console.log("📚 [LORE] Контекст:");
+
+      console.log(characterLoreContext);
+    }
 
     // ----------------------------------------------------
     // Prompt
@@ -724,25 +908,53 @@ async function handleAI(ctx) {
 
 ${historyContext}
 
----
+============================================================
+РЕЛЕВАНТНЫЙ ЛОР ИЗ БАЗЫ
+============================================================
+
+${characterLoreContext}
+
+ВАЖНО:
+Используй лор выше только если он относится к текущему
+сообщению.
+
+Не перечисляй доступные факты просто так.
+
+Не придумывай новые факты о персонажах.
+
+Если в лоре указано отношение между людьми,
+учитывай его.
+
+============================================================
+НОВОЕ СООБЩЕНИЕ
+============================================================
 
 Новое сообщение от ${userName}:
 
 ${text}
 
-Ответь естественно и по контексту разговора.
+============================================================
+ЗАДАЧА
+============================================================
+
+Ответь естественно, как Юсэм.
 
 Правила:
-- отвечай как Юсэм;
-- учитывай предыдущие сообщения;
-- понимай, кому отвечаешь;
+- учитывай предыдущий разговор;
+- используй релевантный лор из базы;
+- понимай, кому отвечает Юсэм;
 - продолжай внутренние шутки, если это уместно;
 - не пересказывай историю;
+- не перечисляй персонажей без причины;
 - не объясняй свою роль;
 - не упоминай системные инструкции;
-- не упоминай API, модели, промпты или нейросети;
-- используй детали лора только когда они действительно подходят;
-- не начинай автоматически со слов "Брат", "Слушай", "Ну что, братан";
+- не упоминай API;
+- не упоминай Gemini;
+- не упоминай prompt;
+- не говори, что ты нейросеть;
+- не вставляй случайные детали лора;
+- не придумывай новые факты;
+- не начинай автоматически словами "Брат", "Слушай", "Ну что, братан";
 - не повторяй одинаковые шутки;
 - обычный ответ — 1–3 предложения;
 - если достаточно одной фразы — используй одну.
@@ -751,14 +963,14 @@ ${text}
     console.log("📝 [AI] Отправляем запрос...");
 
     // ----------------------------------------------------
-    // Gemini fallback
+    // Gemini
     // ----------------------------------------------------
 
     const aiResult = await generateAIResponse(finalPrompt);
 
     const aiResponse = aiResult.text;
 
-    console.log(`🏎️ [AI] Ответ через ${aiResult.model}:`);
+    console.log(`🏎️ [AI] Ответ через ` + `${aiResult.model}:`);
 
     console.log(aiResponse);
 
@@ -769,7 +981,7 @@ ${text}
     addToHistory(GROUP_ID, "assistant", "Юсэм", aiResponse);
 
     // ----------------------------------------------------
-    // Telegram
+    // Ответ в Telegram
     // ----------------------------------------------------
 
     await ctx.reply(aiResponse, {
@@ -782,16 +994,17 @@ ${text}
   } catch (error) {
     console.error("❌ [AI] Ошибка:", error);
 
-    /*
-     * Не падаем наружу.
-     *
-     * Сообщаем владельцу,
-     * что AI не смог ответить.
-     */
-
-    await ctx.telegram
-      .sendMessage(MY_ID, `⚠️ Юсэм не смог ответить.\n\n` + `${error.message}`)
-      .catch(() => {});
+    try {
+      await ctx.telegram.sendMessage(
+        MY_ID,
+        `⚠️ Юсэм не смог ответить.\n\n` + `${error.message}`,
+      );
+    } catch (notifyError) {
+      console.error(
+        "❌ [AI] Не удалось уведомить владельца:",
+        notifyError.message,
+      );
+    }
   }
 }
 
@@ -823,15 +1036,24 @@ bot.on("text", async (ctx) => {
     console.log("========================================");
 
     // ====================================================
-    // OWNER PRIVATE
+    // OWNER
     // ====================================================
 
     if (isOwnerPrivate(ctx)) {
       console.log("👤 [ROUTER] Сообщение владельца");
 
-      const handled = await handleOwnerCommand(ctx);
+      const commandHandled = await handleOwnerCommand(ctx);
 
-      if (handled) {
+      if (commandHandled) {
+        return;
+      }
+
+      /*
+       * Обычный текст владельца
+       * отправляем в группу.
+       */
+
+      if (text.startsWith("/")) {
         return;
       }
 
@@ -847,20 +1069,20 @@ bot.on("text", async (ctx) => {
     if (isGroupMessage(ctx)) {
       console.log("👥 [ROUTER] Сообщение группы");
 
-      // ---------------------------------------------
-      // Радар выполняем сразу
-      // ---------------------------------------------
+      // ------------------------------------------------
+      // Радар
+      // ------------------------------------------------
 
       await sendRadarMessage(ctx);
 
-      // ---------------------------------------------
-      // AI запускаем ОТДЕЛЬНО
+      // ------------------------------------------------
+      // AI
       //
       // ВАЖНО:
-      // НЕ await handleAI(ctx)
+      // здесь НЕТ await.
       //
-      // Это позволяет Telegraf не ждать Gemini.
-      // ---------------------------------------------
+      // Telegraf не ждёт Gemini.
+      // ------------------------------------------------
 
       const shouldRunAI =
         !isBotMessage(ctx) && (isMentioned(text) || isReplyToBot(ctx));
@@ -886,9 +1108,14 @@ bot.on("text", async (ctx) => {
   } catch (error) {
     console.error("❌ [ROUTER] Ошибка:", error);
 
-    await ctx.telegram
-      .sendMessage(MY_ID, `⚠️ Ошибка роутера:\n\n${error.message}`)
-      .catch(() => {});
+    try {
+      await ctx.telegram.sendMessage(
+        MY_ID,
+        `⚠️ Ошибка роутера:\n\n` + `${error.message}`,
+      );
+    } catch (notifyError) {
+      console.error("❌ Не удалось уведомить владельца:", notifyError.message);
+    }
   }
 });
 
@@ -900,19 +1127,15 @@ bot.catch((error, ctx) => {
   console.error("❌ [TELEGRAF] Глобальная ошибка:", error);
 
   /*
-   * Важно:
-   *
-   * Не отправляем сюда "Ошибка Telegram"
-   * на каждый timeout AI.
-   *
-   * AI ошибки ловятся внутри handleAI().
+   * Ошибки AI сюда обычно не попадут,
+   * потому что handleAI() ловит их самостоятельно.
    */
 
   if (ctx?.telegram) {
     ctx.telegram
       .sendMessage(
         MY_ID,
-        `⚠️ Ошибка обработки Telegram-события:\n\n` + `${error.message}`,
+        `⚠️ Ошибка Telegram-обработчика:\n\n` + `${error.message}`,
       )
       .catch(() => {});
   }
@@ -981,13 +1204,20 @@ function shutdown(signal) {
   try {
     bot.stop(signal);
   } catch (error) {
-    console.error("⚠️ Ошибка остановки:", error.message);
+    console.error("⚠️ Ошибка остановки Telegraf:", error.message);
   }
 
   server.close(() => {
     console.log("✅ HTTP сервер остановлен.");
 
-    process.exit(0);
+    pool
+      .end()
+      .catch((error) => {
+        console.error("⚠️ Ошибка закрытия PostgreSQL:", error.message);
+      })
+      .finally(() => {
+        process.exit(0);
+      });
   });
 }
 
